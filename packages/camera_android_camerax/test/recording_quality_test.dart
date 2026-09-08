@@ -1,0 +1,121 @@
+// Copyright 2013 The Flutter Authors
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+import 'package:camera_android_camerax/recording_quality.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
+  const channel = MethodChannel(
+    'plugins.flutter.io/camera_android_camerax/recording_quality',
+  );
+
+  tearDown(() async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null);
+  });
+
+  test(
+    'recordingQualityCapabilities forwards camera name and returns native map',
+    () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+            expect(call.method, 'recordingQualityCapabilities');
+            expect(call.arguments, <String, Object?>{'cameraName': 'front-0'});
+            return <String, Object?>{
+              'profiles': <Map<String, Object?>>[
+                <String, Object?>{'width': 1920, 'height': 1080, 'fps': 30},
+              ],
+              'supportsFocusLock': true,
+              'supportsExposureLock': false,
+            };
+          });
+
+      final result = await recordingQualityCapabilities('front-0');
+
+      expect(result['supportsFocusLock'], isTrue);
+      expect(result['supportsExposureLock'], isFalse);
+      expect(result['profiles'], hasLength(1));
+    },
+  );
+
+  test('recordingQualityApplied preserves nullable applied values', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall call) async {
+          expect(call.method, 'recordingQualityApplied');
+          expect(call.arguments, <String, Object?>{'cameraId': 42});
+          return <String, Object?>{
+            'width': 1280,
+            'height': 720,
+            'fps': null,
+            'stabilizationEnabled': null,
+          };
+        });
+
+    final result = await recordingQualityApplied(42);
+
+    expect(result, <String, Object?>{
+      'width': 1280,
+      'height': 720,
+      'fps': null,
+      'stabilizationEnabled': null,
+    });
+  });
+
+  test('inspectRecordingMedia forwards finalized path', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall call) async {
+          expect(call.method, 'inspectRecordingMedia');
+          expect(call.arguments, <String, Object?>{'path': '/tmp/final.mp4'});
+          return <String, Object?>{
+            'width': 3840,
+            'height': 2160,
+            'fpsSource': 'measured',
+            'bitrateSource': 'estimated',
+          };
+        });
+
+    final result = await inspectRecordingMedia('/tmp/final.mp4');
+
+    expect(result['width'], 3840);
+    expect(result['height'], 2160);
+  });
+
+  test(
+    'waitForRecordingFocus returns unsupported result from native code',
+    () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+            expect(call.method, 'waitForRecordingFocus');
+            expect(call.arguments, <String, Object?>{'cameraId': 7});
+            return false;
+          });
+
+      expect(await waitForRecordingFocus(7), isFalse);
+    },
+  );
+
+  test('native configuration errors remain PlatformExceptions', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall call) async {
+          throw PlatformException(
+            code: 'unsupportedRecordingProfile',
+            message: 'CameraX could not bind 2160p60.',
+          );
+        });
+
+    await expectLater(
+      recordingQualityApplied(99),
+      throwsA(
+        isA<PlatformException>().having(
+          (PlatformException error) => error.code,
+          'code',
+          'unsupportedRecordingProfile',
+        ),
+      ),
+    );
+  });
+}

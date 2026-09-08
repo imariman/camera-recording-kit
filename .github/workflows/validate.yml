@@ -1,0 +1,26 @@
+name: Validate
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  flutter-packages:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.2
+      - name: Analyze and test packages sequentially
+        run: bash tool/validate.sh
+
+  macos-native-synthetic:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run native synthetic camera tests
+        run: python3 tool/test_macos_camera_native.py

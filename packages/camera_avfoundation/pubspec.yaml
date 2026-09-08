@@ -1,0 +1,37 @@
+name: camera_avfoundation
+publish_to: 'none'
+description: iOS implementation of the camera plugin.
+repository: https://github.com/imariman/camera-recording-kit/tree/main/packages/camera_avfoundation
+issue_tracker: https://github.com/imariman/camera-recording-kit/issues
+version: 0.10.2
+
+environment:
+  sdk: ^3.10.0
+  flutter: ">=3.38.0"
+
+flutter:
+  plugin:
+    implements: camera
+    platforms:
+      ios:
+        pluginClass: CameraPlugin
+        dartPluginClass: AVFoundationCamera
+
+dependencies:
+  camera_platform_interface: ^2.13.0
+  flutter:
+    sdk: flutter
+  stream_transform: ^2.0.0
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  async: ^2.5.0
+  build_runner: ^2.4.9
+  flutter_test:
+    sdk: flutter
+  leak_tracker_flutter_testing: any
+  mockito: ^5.4.4
+  pigeon: ^26.1.5
+
+topics:
+  - camera
