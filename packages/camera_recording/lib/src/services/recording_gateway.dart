@@ -8,6 +8,7 @@ import 'package:camera_desktop/recording_quality.dart' as macos;
 
 import 'package:camera_recording/src/models/recorded_media_metadata.dart';
 import 'package:camera_recording/src/models/recording_capabilities.dart';
+import 'package:camera_recording/src/models/recording_profile.dart';
 
 /// Platform selection can be injected to verify routing without real hardware.
 enum RecordingBackend { android, ios, macos, unsupported }
@@ -51,8 +52,28 @@ class RecordingGateway {
     required ResolutionPreset preset,
     required bool enableAudio,
     int? fps,
-  }) =>
-      CameraController(description, preset, enableAudio: enableAudio, fps: fps);
+    int? videoBitrate,
+    int? audioBitrate,
+  }) => CameraController(
+    description,
+    preset,
+    enableAudio: enableAudio,
+    fps: fps,
+    videoBitrate: videoBitrate,
+    audioBitrate: audioBitrate,
+  );
+
+  Future<void> prepareVideoCodec(RecordingVideoCodec codec) =>
+      switch (_backend) {
+        RecordingBackend.android => android.setRecordingVideoCodec(codec.name),
+        RecordingBackend.ios => ios.setRecordingVideoCodec(codec.name),
+        RecordingBackend.macos => macos.setRecordingVideoCodec(codec.name),
+        RecordingBackend.unsupported when codec == RecordingVideoCodec.h264 =>
+          Future<void>.value(),
+        RecordingBackend.unsupported => throw UnsupportedError(
+          'HEVC recording is unavailable on this platform.',
+        ),
+      };
 
   Future<Map<String, dynamic>> applied(int cameraId) async =>
       switch (_backend) {

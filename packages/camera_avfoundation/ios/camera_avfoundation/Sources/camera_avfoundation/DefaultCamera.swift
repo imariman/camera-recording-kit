@@ -38,6 +38,7 @@ final class DefaultCamera: NSObject, Camera {
   private let captureSessionQueue: DispatchQueue
 
   private let mediaSettings: PlatformMediaSettings
+  private let recordingVideoCodec: RecordingQuality.VideoCodec
   private var framesPerSecond: Double?
   private let mediaSettingsAVWrapper: FLTCamMediaSettingsAVWrapper
 
@@ -164,6 +165,7 @@ final class DefaultCamera: NSObject, Camera {
   init(configuration: CameraConfiguration) throws {
     captureSessionQueue = configuration.captureSessionQueue
     mediaSettings = configuration.mediaSettings
+    recordingVideoCodec = configuration.recordingVideoCodec
     mediaSettingsAVWrapper = configuration.mediaSettingsWrapper
     videoCaptureSession = configuration.videoCaptureSession
     audioCaptureSession = configuration.audioCaptureSession
@@ -644,14 +646,18 @@ final class DefaultCamera: NSObject, Camera {
       return false
     }
 
-    var videoSettings = mediaSettingsAVWrapper.recommendedVideoSettingsForAssetWriter(
+    guard var videoSettings = mediaSettingsAVWrapper.recommendedVideoSettingsForAssetWriter(
       withFileType:
         AVFileType.mp4,
       for: captureVideoOutput
-    )
+    ) else {
+      return false
+    }
+
+    videoSettings[AVVideoCodecKey] = recordingVideoCodec.avVideoCodecType
 
     if mediaSettings.videoBitrate != nil || framesPerSecond != nil {
-      var compressionProperties = videoSettings?[AVVideoCompressionPropertiesKey] as? [String: Any]
+      var compressionProperties = videoSettings[AVVideoCompressionPropertiesKey] as? [String: Any]
         ?? [:]
 
       if let videoBitrate = mediaSettings.videoBitrate {
@@ -662,7 +668,11 @@ final class DefaultCamera: NSObject, Camera {
         compressionProperties[AVVideoExpectedSourceFrameRateKey] = framesPerSecond
       }
 
-      videoSettings?[AVVideoCompressionPropertiesKey] = compressionProperties
+      videoSettings[AVVideoCompressionPropertiesKey] = compressionProperties
+    }
+
+    guard RecordingQuality.supportsEncoding(outputSettings: videoSettings) else {
+      return false
     }
 
     let videoWriterInput = mediaSettingsAVWrapper.assetWriterVideoInput(
@@ -1115,6 +1125,7 @@ final class DefaultCamera: NSObject, Camera {
     var result: [String: Any] = [
       "width": Int(dimensions.width),
       "height": Int(dimensions.height),
+      "codec": recordingVideoCodec.rawValue,
     ]
 
     let duration = captureDevice.activeVideoMinFrameDuration

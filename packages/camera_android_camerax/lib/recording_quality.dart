@@ -11,7 +11,9 @@ const MethodChannel _recordingQualityChannel = MethodChannel(
 /// Returns verified SDR recording profiles and lock capabilities for the
 /// camera identified by the CameraX camera name.
 ///
-/// Each profile contains integer `width`, `height`, and `fps` values. Only
+/// Each profile contains integer `width`, `height`, and `fps` values plus a
+/// `codecs` list. CameraX does not currently expose codec selection, so the
+/// Android backend advertises only `h264`. Only
 /// 30 or 60 FPS combinations validated against CameraX, a containing camera
 /// frame-rate range, per-size sensor duration, and encoder constraints are
 /// returned.
@@ -21,10 +23,29 @@ Future<Map<String, dynamic>> recordingQualityCapabilities(String cameraName) {
   });
 }
 
+/// Selects the video codec requested for subsequent recording initialization.
+///
+/// Android CameraX currently supports only `h264` through this extension.
+/// Requesting `hevc` throws a [PlatformException] with code
+/// `unsupportedVideoCodec` instead of silently recording with another codec.
+/// Any other value is rejected locally with [ArgumentError].
+Future<void> setRecordingVideoCodec(String codec) async {
+  if (codec != 'h264' && codec != 'hevc') {
+    throw ArgumentError.value(codec, 'codec', 'Must be h264 or hevc.');
+  }
+  await _recordingQualityChannel.invokeMethod<void>(
+    'setRecordingVideoCodec',
+    <String, Object?>{'codec': codec},
+  );
+}
+
 /// Returns the profile currently applied to the bound recording use case.
 ///
 /// The map contains integer `width` and `height`, nullable numeric `fps`, and
-/// nullable boolean `stabilizationEnabled` values. A profile that CameraX did
+/// nullable boolean `stabilizationEnabled` values. Because CameraX does not
+/// expose the selected encoder codec before recording, `codec` is null and
+/// `codecSource` is `unavailableUntilFinalized`. The authoritative codec of a
+/// finalized file is returned by [inspectRecordingMedia]. A profile that CameraX did
 /// not finish binding is reported as a [PlatformException] with code
 /// `unsupportedRecordingProfile`.
 Future<Map<String, dynamic>> recordingQualityApplied(int cameraId) {

@@ -21,6 +21,23 @@ Future<Map<String, dynamic>> recordingQualityApplied(int cameraId) {
   });
 }
 
+/// Selects the video codec for the next desktop camera controller created on
+/// macOS. Supported values are `h264` and `hevc` (H.265).
+///
+/// Call this before creating the controller. The native backend consumes this
+/// one-shot selection when it receives the next `create` request, so a
+/// controller that already exists is never silently reconfigured.
+Future<void> setRecordingVideoCodec(String codec) async {
+  final normalizedCodec = codec.toLowerCase();
+  if (normalizedCodec != 'h264' && normalizedCodec != 'hevc') {
+    throw ArgumentError.value(codec, 'codec', 'Must be h264 or hevc.');
+  }
+  await _recordingQualityChannel.invokeMethod<void>(
+    'setRecordingVideoCodec',
+    <String, dynamic>{'codec': normalizedCodec},
+  );
+}
+
 /// Inspects finalized recording metadata without changing the file.
 Future<Map<String, dynamic>> inspectRecordingMedia(String path) {
   return _invokeMap('inspectRecordingMedia', <String, dynamic>{'path': path});

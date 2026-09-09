@@ -27,7 +27,12 @@ void main() {
             expect(call.arguments, <String, Object?>{'cameraName': 'front-0'});
             return <String, Object?>{
               'profiles': <Map<String, Object?>>[
-                <String, Object?>{'width': 1920, 'height': 1080, 'fps': 30},
+                <String, Object?>{
+                  'width': 1920,
+                  'height': 1080,
+                  'fps': 30,
+                  'codecs': <String>['h264'],
+                },
               ],
               'supportsFocusLock': true,
               'supportsExposureLock': false,
@@ -42,6 +47,44 @@ void main() {
     },
   );
 
+  test('setRecordingVideoCodec forwards supported codec', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall call) async {
+          expect(call.method, 'setRecordingVideoCodec');
+          expect(call.arguments, <String, Object?>{'codec': 'h264'});
+          return null;
+        });
+
+    await setRecordingVideoCodec('h264');
+  });
+
+  test(
+    'setRecordingVideoCodec forwards hevc for native capability check',
+    () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+            expect(call.method, 'setRecordingVideoCodec');
+            expect(call.arguments, <String, Object?>{'codec': 'hevc'});
+            throw PlatformException(code: 'unsupportedVideoCodec');
+          });
+
+      await expectLater(
+        setRecordingVideoCodec('hevc'),
+        throwsA(
+          isA<PlatformException>().having(
+            (PlatformException error) => error.code,
+            'code',
+            'unsupportedVideoCodec',
+          ),
+        ),
+      );
+    },
+  );
+
+  test('setRecordingVideoCodec rejects unknown codec locally', () async {
+    await expectLater(setRecordingVideoCodec('vp9'), throwsArgumentError);
+  });
+
   test('recordingQualityApplied preserves nullable applied values', () async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(channel, (MethodCall call) async {
@@ -52,6 +95,8 @@ void main() {
             'height': 720,
             'fps': null,
             'stabilizationEnabled': null,
+            'codec': null,
+            'codecSource': 'unavailableUntilFinalized',
           };
         });
 
@@ -62,6 +107,8 @@ void main() {
       'height': 720,
       'fps': null,
       'stabilizationEnabled': null,
+      'codec': null,
+      'codecSource': 'unavailableUntilFinalized',
     });
   });
 

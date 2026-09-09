@@ -129,8 +129,9 @@ final settled = await waitForRecordingFocus(controller.cameraId);
 
 The channel is `dev.teleprompter/camera_desktop_recording_quality`. Capability
 discovery resolves the selected AVFoundation `uniqueID`, identifies internal,
-external, and Continuity cameras, and returns only H.264-compatible SDR
-profiles: safe 640x480p30 plus 720p, 1080p, and 2160p at supported 30/60 FPS.
+external, and Continuity cameras, and returns encoder-compatible SDR
+profiles with exact H.264/HEVC support: safe 640x480p30 plus 720p, 1080p,
+and 2160p at supported 30/60 FPS.
 No profile above 4K is advertised or selected.
 
 `ResolutionPreset.medium`, `high`, `veryHigh`, and `ultraHigh` map to exact

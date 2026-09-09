@@ -22,5 +22,9 @@ most two seconds and reports convergence without changing the lock modes. The
 host applies both locks after a successful result; a timeout or unsupported lock
 returns `false` so the host can retain continuous automatic focus and exposure.
 
+Each exact profile includes encoder-validated H.264/HEVC support.
+Call `setRecordingVideoCodec` before controller creation to select the
+codec used by the next recording configuration.
+
 [1]: https://pub.dev/packages/camera
 [2]: https://flutter.dev/to/endorsed-federated-plugin

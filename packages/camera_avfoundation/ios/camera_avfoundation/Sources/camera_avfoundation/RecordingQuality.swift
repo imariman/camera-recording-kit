@@ -3,6 +3,18 @@
 import AVFoundation
 
 enum RecordingQuality {
+  enum VideoCodec: String, CaseIterable {
+    case h264
+    case hevc
+
+    var avVideoCodecType: AVVideoCodecType {
+      switch self {
+      case .h264: return .h264
+      case .hevc: return .hevc
+      }
+    }
+  }
+
   private struct Profile: Hashable {
     let width: Int32
     let height: Int32
@@ -27,11 +39,17 @@ enum RecordingQuality {
       for requested in requestedProfiles
       where dimensions.width == requested.width && dimensions.height == requested.height
       {
-        for fps in requested.frameRates
-        where supports(frameRate: Double(fps), on: format)
-          && supportsEncoding(width: dimensions.width, height: dimensions.height, fps: fps)
-        {
-          profiles.insert(Profile(width: dimensions.width, height: dimensions.height, framesPerSecond: fps))
+        for fps in requested.frameRates where supports(frameRate: Double(fps), on: format) {
+          let codecs = VideoCodec.allCases.filter {
+            supportsEncoding(
+              width: dimensions.width,
+              height: dimensions.height,
+              fps: fps,
+              codec: $0)
+          }
+          if !codecs.isEmpty {
+            profiles.insert(Profile(width: dimensions.width, height: dimensions.height, framesPerSecond: fps))
+          }
         }
       }
     }
@@ -43,8 +61,20 @@ enum RecordingQuality {
     }
 
     return [
-      "profiles": sortedProfiles.map {
-        ["width": Int($0.width), "height": Int($0.height), "fps": $0.framesPerSecond]
+      "profiles": sortedProfiles.map { profile in
+        let codecs = VideoCodec.allCases.filter {
+          supportsEncoding(
+            width: profile.width,
+            height: profile.height,
+            fps: profile.framesPerSecond,
+            codec: $0)
+        }
+        return [
+          "width": Int(profile.width),
+          "height": Int(profile.height),
+          "fps": profile.framesPerSecond,
+          "codecs": codecs.map(\.rawValue),
+        ]
       },
       "supportsFocusLock": device.isFocusModeSupported(.locked),
       "supportsExposureLock": device.isExposureModeSupported(.locked),
@@ -122,9 +152,14 @@ enum RecordingQuality {
     }
   }
 
-  private static func supportsEncoding(width: Int32, height: Int32, fps: Int) -> Bool {
+  static func supportsEncoding(
+    width: Int32,
+    height: Int32,
+    fps: Int,
+    codec: VideoCodec
+  ) -> Bool {
     let settings: [String: Any] = [
-      AVVideoCodecKey: AVVideoCodecType.h264,
+      AVVideoCodecKey: codec.avVideoCodecType,
       AVVideoWidthKey: Int(width),
       AVVideoHeightKey: Int(height),
       AVVideoCompressionPropertiesKey: [
@@ -136,7 +171,21 @@ enum RecordingQuality {
     guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .mp4) else {
       return false
     }
+    defer { try? FileManager.default.removeItem(at: outputURL) }
     return writer.canApply(outputSettings: settings, forMediaType: .video)
+  }
+
+  /// Checks that a fully configured Asset Writer input supports the requested
+  /// codec. This is intentionally performed before recording starts so an
+  /// unsupported HEVC selection cannot produce a partially initialized writer.
+  static func supportsEncoding(outputSettings: [String: Any]) -> Bool {
+    let outputURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("recording-quality-\(UUID().uuidString).mp4")
+    guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .mp4) else {
+      return false
+    }
+    defer { try? FileManager.default.removeItem(at: outputURL) }
+    return writer.canApply(outputSettings: outputSettings, forMediaType: .video)
   }
 
   private static func measuredFrameRate(
@@ -184,7 +233,12 @@ enum RecordingQuality {
       Character(UnicodeScalar((subtype >> 8) & 0xff)!),
       Character(UnicodeScalar(subtype & 0xff)!),
     ]
-    return String(characters).trimmingCharacters(in: .whitespaces)
+    let fourCharacterCode = String(characters).trimmingCharacters(in: .whitespaces)
+    switch fourCharacterCode {
+    case "avc1": return VideoCodec.h264.rawValue
+    case "hvc1", "hev1": return VideoCodec.hevc.rawValue
+    default: return fourCharacterCode
+    }
   }
 
   private static func rotationDegrees(for transform: CGAffineTransform) -> Int {

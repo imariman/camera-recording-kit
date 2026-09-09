@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import 'package:flutter/services.dart';
 
 import 'package:camera/camera.dart';
@@ -8,14 +9,14 @@ import 'package:camera_recording/src/models/recording_profile.dart';
 import 'package:camera_recording/src/models/recording_capabilities.dart';
 import 'package:camera_recording/src/models/recorded_media_metadata.dart';
 import 'package:camera_recording/src/models/recording_result.dart';
+import 'package:camera_recording/src/models/recording_storage_estimate.dart';
 import 'package:camera_recording/src/services/recording_gateway.dart';
 
-typedef CameraControllerFactory =
-    CameraController Function({
-      required CameraDescription description,
-      required ResolutionPreset resolutionPreset,
-      required bool enableAudio,
-    });
+typedef CameraControllerFactory = CameraController Function({
+  required CameraDescription description,
+  required ResolutionPreset resolutionPreset,
+  required bool enableAudio,
+});
 
 /// When starting a new controller and restoring the previous camera/profile
 /// both fail, the service has no usable preview. Both errors are retained for diagnostics.
@@ -75,6 +76,13 @@ class CameraService {
   Future<void>? _disposeFuture;
   bool _disposeRequested = false;
   bool _videoStabilizationEnabled = false;
+  double _minimumZoomLevel = 1;
+  double _maximumZoomLevel = 1;
+  double _zoomLevel = 1;
+  double _minimumExposureOffset = 0;
+  double _maximumExposureOffset = 0;
+  double _exposureOffsetStepSize = 0;
+  double _exposureOffset = 0;
 
   CameraController? get controller => _controller;
   List<CameraDescription> get cameras => List.unmodifiable(_cameras);
@@ -91,6 +99,16 @@ class CameraService {
   bool get supportsVideoStabilization =>
       _capabilities.supportsVideoStabilization;
   bool get videoStabilizationEnabled => _videoStabilizationEnabled;
+  double get minimumZoomLevel => _minimumZoomLevel;
+  double get maximumZoomLevel => _maximumZoomLevel;
+  double get zoomLevel => _zoomLevel;
+  double get minimumExposureOffset => _minimumExposureOffset;
+  double get maximumExposureOffset => _maximumExposureOffset;
+  double get exposureOffsetStepSize => _exposureOffsetStepSize;
+  double get exposureOffset => _exposureOffset;
+  bool get supportsZoom => _maximumZoomLevel > _minimumZoomLevel;
+  bool get supportsExposureCompensation =>
+      _maximumExposureOffset > _minimumExposureOffset;
 
   /// Switches front/back cameras on mobile and built-in, external, or Continuity
   /// cameras on desktop. No button is shown on single-camera devices.
@@ -248,6 +266,9 @@ class CameraService {
     _focusLockUnavailable = false;
     if (!supportsQualitySelection) {
       final factory = _controllerFactory;
+      if (factory == null) {
+        await _gateway.prepareVideoCodec(recordingProfile.videoCodec);
+      }
       final controller = factory != null
           ? factory(
               description: description,
@@ -267,6 +288,11 @@ class CameraService {
         if (_videoStabilizationEnabled) {
           await _applyVideoStabilization(controller, enabled: true);
         }
+        await _applyOrientationLock(
+          controller,
+          locked: recordingProfile.lockOrientation,
+        );
+        await _loadManualControls(controller);
         _appliedProfile = null;
         return controller;
       } catch (_) {
@@ -276,7 +302,15 @@ class CameraService {
     }
 
     final capabilities = await _gateway.capabilities(description.name);
-    final candidates = capabilities.candidates(recordingProfile);
+    var effectiveProfile = recordingProfile;
+    var candidates = capabilities.candidates(effectiveProfile);
+    if (candidates.isEmpty &&
+        recordingProfile.videoCodec != RecordingVideoCodec.h264) {
+      effectiveProfile = recordingProfile.copyWith(
+        videoCodec: RecordingVideoCodec.h264,
+      );
+      candidates = capabilities.candidates(effectiveProfile);
+    }
     if (candidates.isEmpty) {
       throw CameraException(
         'unsupportedRecordingProfile',
@@ -289,11 +323,19 @@ class CameraService {
         throw CameraException('disposed', 'Camera was disposed.');
       }
       final candidate = candidates[index];
+      await _gateway.prepareVideoCodec(effectiveProfile.videoCodec);
       final controller = _gateway.createController(
         description: description,
         preset: presetForFormat(candidate),
         enableAudio: recordingProfile.recordAudio,
         fps: candidate.fps,
+        videoBitrate: RecordingStorageEstimate.requestedVideoBitrate(
+          effectiveProfile,
+          candidate,
+        ),
+        audioBitrate: recordingProfile.recordAudio
+            ? RecordingStorageEstimate.audioBitrate
+            : null,
       );
       try {
         await _gateway.initialize(controller);
@@ -302,7 +344,9 @@ class CameraService {
         }
         final actual = await _gateway.applied(controller.cameraId);
         final format = RecordingVideoFormat.tryParse(actual);
-        if (format == null || format != candidate) {
+        if (format == null ||
+            format != candidate ||
+            !format.supportsCodec(effectiveProfile.videoCodec)) {
           throw CameraException(
             'unsupportedRecordingProfile',
             'Applied format differs from request.',
@@ -312,11 +356,17 @@ class CameraService {
           controller,
           enabled: _videoStabilizationEnabled,
         );
+        await _applyOrientationLock(
+          controller,
+          locked: recordingProfile.lockOrientation,
+        );
+        await _loadManualControls(controller);
         final isFallback =
             index > 0 ||
             format.fps != recordingProfile.fps ||
             (recordingProfile.resolution != RecordingResolution.automatic &&
                 format.shortSide != recordingProfile.resolution.height) ||
+            effectiveProfile.videoCodec != recordingProfile.videoCodec ||
             format.shortSide < 720;
         _recordingCapabilities = capabilities;
         _appliedProfile = AppliedRecordingProfile(
@@ -373,6 +423,86 @@ class CameraService {
         >= 720 => ResolutionPreset.high,
         _ => ResolutionPreset.medium,
       };
+
+  Future<void> _loadManualControls(CameraController controller) async {
+    try {
+      final values = await Future.wait<double>([
+        controller.getMinZoomLevel(),
+        controller.getMaxZoomLevel(),
+        controller.getMinExposureOffset(),
+        controller.getMaxExposureOffset(),
+        controller.getExposureOffsetStepSize(),
+      ]);
+      _minimumZoomLevel = values[0];
+      _maximumZoomLevel = values[1];
+      _zoomLevel = 1.clamp(_minimumZoomLevel, _maximumZoomLevel).toDouble();
+      _minimumExposureOffset = values[2];
+      _maximumExposureOffset = values[3];
+      _exposureOffsetStepSize = values[4];
+      _exposureOffset = 0
+          .clamp(_minimumExposureOffset, _maximumExposureOffset)
+          .toDouble();
+    } catch (_) {
+      _minimumZoomLevel = 1;
+      _maximumZoomLevel = 1;
+      _zoomLevel = 1;
+      _minimumExposureOffset = 0;
+      _maximumExposureOffset = 0;
+      _exposureOffsetStepSize = 0;
+      _exposureOffset = 0;
+    }
+  }
+
+  Future<void> _applyOrientationLock(
+    CameraController controller, {
+    required bool locked,
+  }) async {
+    try {
+      if (locked) {
+        await controller.lockCaptureOrientation();
+      } else if (controller.value.isCaptureOrientationLocked) {
+        await controller.unlockCaptureOrientation();
+      }
+    } catch (_) {
+      // Orientation locking is optional on cameras without orientation data.
+      // A rejected lock must not make the preview unusable.
+    }
+  }
+
+  Future<bool> setZoomLevel(double value) {
+    if (_disposeRequested) return Future<bool>.value(false);
+    return _enqueue(() async {
+      final controller = _controller;
+      if (controller == null || !controller.value.isInitialized) return false;
+      final clamped = value
+          .clamp(_minimumZoomLevel, _maximumZoomLevel)
+          .toDouble();
+      try {
+        await controller.setZoomLevel(clamped);
+        _zoomLevel = clamped;
+        return true;
+      } catch (_) {
+        return false;
+      }
+    });
+  }
+
+  Future<bool> setExposureOffset(double value) {
+    if (_disposeRequested) return Future<bool>.value(false);
+    return _enqueue(() async {
+      final controller = _controller;
+      if (controller == null || !controller.value.isInitialized) return false;
+      final clamped = value
+          .clamp(_minimumExposureOffset, _maximumExposureOffset)
+          .toDouble();
+      try {
+        _exposureOffset = await controller.setExposureOffset(clamped);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    });
+  }
 
   /// Applies a recording profile only when recording is inactive. An initialized
   /// controller restarts for new audio or preset settings; while recording this

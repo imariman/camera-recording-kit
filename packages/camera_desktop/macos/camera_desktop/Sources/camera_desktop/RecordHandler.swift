@@ -10,6 +10,7 @@ class RecordHandler: NSObject {
     private let lock = UnfairLock()
     private let timeline: RecordingTimeline
     private var recording = false
+    private(set) var selectedVideoCodec: RecordingQuality.VideoCodec?
 
     var isRecording: Bool {
         lock.lock()
@@ -40,6 +41,8 @@ class RecordHandler: NSObject {
     ///   - height: Video frame height.
     ///   - targetFps: Target frame rate for encoder hints.
     ///   - targetBitrate: Target average bitrate in bits per second (0 = default).
+    ///   - videoCodec: The AVAssetWriter video codec, already verified during
+    ///     controller creation.
     ///   - enableAudio: Whether to record audio.
     ///   - captureClock: The capture session clock used by sample timestamps.
     /// - Returns: The output file path on success.
@@ -49,6 +52,7 @@ class RecordHandler: NSObject {
                         targetFps: Int,
                         targetBitrate: Int,
                         audioBitrate: Int = 0,
+                        videoCodec: RecordingQuality.VideoCodec = .h264,
                         enableAudio: Bool,
                         captureClock: CMClock? = nil) throws -> String {
         lock.lock()
@@ -75,7 +79,8 @@ class RecordHandler: NSObject {
             )
         }
 
-        // Video input, H.264 encoding.
+        // Video input. Keep the codec explicit: AVAssetWriter must never
+        // substitute HEVC for H.264 (or vice versa) behind the Dart contract.
         var compression: [String: Any] = [
             AVVideoExpectedSourceFrameRateKey: targetFps,
             AVVideoMaxKeyFrameIntervalKey: max(targetFps, 1),
@@ -85,21 +90,21 @@ class RecordHandler: NSObject {
         }
 
         let videoSettings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoCodecKey: videoCodec.avVideoCodecType,
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
             AVVideoCompressionPropertiesKey: compression,
         ]
         guard writer.canApply(outputSettings: videoSettings, forMediaType: .video) else {
             throw RecordingQuality.unsupportedProfileError(
-                "The H.264 encoder rejected \(width)x\(height) at \(targetFps) FPS."
+                "The \(videoCodec.displayName) encoder rejected \(width)x\(height) at \(targetFps) FPS."
             )
         }
         let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         vInput.expectsMediaDataInRealTime = true
         guard writer.canAdd(vInput) else {
             throw RecordingQuality.unsupportedProfileError(
-                "The H.264 encoder input rejected the requested recording profile."
+                "The \(videoCodec.displayName) encoder input rejected the requested recording profile."
             )
         }
         writer.add(vInput)
@@ -155,6 +160,7 @@ class RecordHandler: NSObject {
         }
         timeline.reset(clock: timelineClock)
         recording = true
+        selectedVideoCodec = videoCodec
         lock.unlock()
 
         return path

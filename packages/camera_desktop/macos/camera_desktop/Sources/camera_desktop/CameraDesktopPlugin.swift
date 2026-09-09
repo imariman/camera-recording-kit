@@ -13,6 +13,10 @@ public class CameraDesktopPlugin: NSObject, FlutterPlugin, NSApplicationDelegate
     private let textureRegistry: FlutterTextureRegistry
     private let methodChannel: FlutterMethodChannel
     private let recordingQualityChannel: FlutterMethodChannel
+    // A codec choice is deliberately one-shot. It applies only to the next
+    // controller created after the call, avoiding a mutation of a live writer.
+    private let pendingCodecLock = UnfairLock()
+    private var pendingRecordingVideoCodec: RecordingQuality.VideoCodec?
 
     init(textureRegistry: FlutterTextureRegistry,
          methodChannel: FlutterMethodChannel,
@@ -122,6 +126,8 @@ public class CameraDesktopPlugin: NSObject, FlutterPlugin, NSApplicationDelegate
             handleRecordingQualityCapabilities(call: call, result: result)
         case "recordingQualityApplied":
             handleRecordingQualityApplied(call: call, result: result)
+        case "setRecordingVideoCodec":
+            handleSetRecordingVideoCodec(call: call, result: result)
         case "inspectRecordingMedia":
             handleInspectRecordingMedia(call: call, result: result)
         case "waitForRecordingFocus":
@@ -232,13 +238,15 @@ public class CameraDesktopPlugin: NSObject, FlutterPlugin, NSApplicationDelegate
         let cameraId = nextCameraId
         nextCameraId += 1
 
+        let videoCodec = consumePendingRecordingVideoCodec()
         let config = CameraSession.CameraConfig(
             deviceId: deviceId,
             resolutionPreset: resolutionPreset,
             enableAudio: enableAudio,
             targetFps: targetFps,
             targetBitrate: targetBitrate,
-            audioBitrate: targetAudioBitrate
+            audioBitrate: targetAudioBitrate,
+            videoCodec: videoCodec
         )
 
         let session = CameraSession(
@@ -410,6 +418,26 @@ public class CameraDesktopPlugin: NSObject, FlutterPlugin, NSApplicationDelegate
         session.recordingQualityApplied(result: result)
     }
 
+    private func handleSetRecordingVideoCodec(
+        call: FlutterMethodCall,
+        result: @escaping FlutterResult
+    ) {
+        guard let args = call.arguments as? [String: Any],
+              let rawCodec = args["codec"] as? String,
+              let codec = RecordingQuality.VideoCodec(rawValue: rawCodec.lowercased()) else {
+            result(FlutterError(
+                code: "invalid_video_codec",
+                message: "codec must be 'h264' or 'hevc'.",
+                details: nil
+            ))
+            return
+        }
+        pendingCodecLock.lock()
+        pendingRecordingVideoCodec = codec
+        pendingCodecLock.unlock()
+        result(nil)
+    }
+
     private func handleInspectRecordingMedia(
         call: FlutterMethodCall,
         result: @escaping FlutterResult
@@ -491,6 +519,14 @@ public class CameraDesktopPlugin: NSObject, FlutterPlugin, NSApplicationDelegate
 
     private func unsupportedRecordingProfile(_ message: String) -> FlutterError {
         return FlutterError(code: "unsupportedRecordingProfile", message: message, details: nil)
+    }
+
+    private func consumePendingRecordingVideoCodec() -> RecordingQuality.VideoCodec {
+        pendingCodecLock.lock()
+        let codec = pendingRecordingVideoCodec ?? .h264
+        pendingRecordingVideoCodec = nil
+        pendingCodecLock.unlock()
+        return codec
     }
 
     private func recordingQualityError(_ error: Error) -> FlutterError {

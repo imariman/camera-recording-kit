@@ -37,6 +37,10 @@ Android recording backend directly:
 * `inspectRecordingMedia(path)` reads finalized MP4 container and track
   metadata without decoding video frames.
 
+Each exact format advertises its codec support. CameraX advertises H.264 only
+because its public Recorder API cannot deterministically select HEVC;
+`setRecordingVideoCodec('hevc')` therefore reports `unsupportedVideoCodec`.
+
 Initialization binds `Preview` and `VideoCapture` together. Still capture and
 image analysis remain available and are bound lazily when requested. Recording
 quality selection uses an exact CameraX `QualitySelector`; callers should retry

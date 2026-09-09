@@ -24,8 +24,13 @@ void main() {
               'cameraName': 'back-camera',
             });
             return <String, dynamic>{
-              'profiles': <Map<String, int>>[
-                <String, int>{'width': 1920, 'height': 1080, 'fps': 30},
+              'profiles': <Map<String, dynamic>>[
+                <String, dynamic>{
+                  'width': 1920,
+                  'height': 1080,
+                  'fps': 30,
+                  'codecs': <String>['h264', 'hevc'],
+                },
               ],
               'supportsFocusLock': true,
               'supportsExposureLock': true,
@@ -36,6 +41,10 @@ void main() {
 
       expect(capabilities['supportsFocusLock'], isTrue);
       expect(capabilities['profiles'], hasLength(1));
+      expect(
+        (capabilities['profiles'] as List<Object?>).single,
+        containsPair('codecs', <String>['h264', 'hevc']),
+      );
     },
   );
 
@@ -49,6 +58,7 @@ void main() {
             'height': 720,
             'fps': 60,
             'stabilizationEnabled': false,
+            'codec': 'hevc',
           };
         });
 
@@ -56,7 +66,22 @@ void main() {
 
     expect(applied['fps'], 60);
     expect(applied['stabilizationEnabled'], isFalse);
+    expect(applied['codec'], 'hevc');
   });
+
+  test(
+    'setRecordingVideoCodec passes an HEVC request before camera creation',
+    () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+            expect(call.method, 'setRecordingVideoCodec');
+            expect(call.arguments, <String, dynamic>{'codec': 'hevc'});
+            return null;
+          });
+
+      await setRecordingVideoCodec('hevc');
+    },
+  );
 
   test('waitForRecordingFocus returns false for an unsupported lens', () async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

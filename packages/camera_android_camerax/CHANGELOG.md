@@ -1,5 +1,7 @@
 ## 0.7.4+3
 
+* Adds exact-format codec capability metadata and explicit rejection when
+  deterministic HEVC selection is unavailable through CameraX Recorder.
 * Updates `ResolutionPreset.max` to prefer higher resolution over capture rate
   for CameraX `ResolutionSelector` use cases on Android.
 
