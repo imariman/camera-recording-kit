@@ -91,9 +91,12 @@ class FLTCamMediaSettingsAVWrapper {
   ///   - output: The `FLTCaptureVideoDataOutput` instance.
   /// - Returns: A fully populated dictionary of keys and values that are compatible with AVAssetWriter.
   func recommendedVideoSettingsForAssetWriter(
-    withFileType fileType: AVFileType,
+    withVideoCodecType videoCodecType: AVVideoCodecType,
+    fileType: AVFileType,
     for output: CaptureVideoDataOutput
   ) -> [String: Any]? {
-    return output.avOutput.recommendedVideoSettingsForAssetWriter(writingTo: fileType)
+    return output.avOutput.recommendedVideoSettings(
+      forVideoCodecType: videoCodecType,
+      assetWriterOutputFileType: fileType)
   }
 }

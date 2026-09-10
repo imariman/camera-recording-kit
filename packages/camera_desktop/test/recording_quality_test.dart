@@ -26,8 +26,13 @@ void main() {
           return <String, dynamic>{
             'cameraUniqueId': 'camera-unique-id',
             'cameraType': 'internal',
-            'profiles': <Map<String, int>>[
-              <String, int>{'width': 1920, 'height': 1080, 'fps': 30},
+            'profiles': <Map<String, dynamic>>[
+              <String, dynamic>{
+                'width': 1920,
+                'height': 1080,
+                'fps': 30,
+                'codecs': <String>['h264', 'hevc'],
+              },
             ],
             'supportsFocusLock': true,
             'supportsExposureLock': true,
@@ -43,6 +48,10 @@ void main() {
     expect(capabilities['cameraType'], 'internal');
     expect(capabilities['supportsVideoStabilization'], isFalse);
     expect(capabilities['profiles'], hasLength(1));
+    expect(
+      (capabilities['profiles'] as List<dynamic>).single['codecs'],
+      <String>['h264', 'hevc'],
+    );
   });
 
   test('applied quality forwards the active camera ID', () async {
@@ -56,6 +65,7 @@ void main() {
             'fps': 60.0,
             'configuredWidth': 1280,
             'configuredHeight': 720,
+            'codec': 'hevc',
             'stabilizationEnabled': false,
           };
         });
@@ -63,8 +73,33 @@ void main() {
     final applied = await recordingQualityApplied(42);
 
     expect(applied['fps'], 60.0);
+    expect(applied['codec'], 'hevc');
     expect(applied['stabilizationEnabled'], isFalse);
   });
+
+  test(
+    'video codec selection is normalized and sent as a one-shot setting',
+    () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+            expect(call.method, 'setRecordingVideoCodec');
+            expect(call.arguments, <String, dynamic>{'codec': 'hevc'});
+            return null;
+          });
+
+      await setRecordingVideoCodec('HEVC');
+    },
+  );
+
+  test(
+    'video codec selection rejects unsupported codecs before platform call',
+    () async {
+      await expectLater(
+        setRecordingVideoCodec('vp9'),
+        throwsA(isA<ArgumentError>()),
+      );
+    },
+  );
 
   test('media inspection forwards the finalized path', () async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

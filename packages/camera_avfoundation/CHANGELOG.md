@@ -1,5 +1,7 @@
 ## 0.10.2
 
+* Adds encoder-validated H.264/HEVC capability metadata and one-shot codec
+  selection for the next camera configuration.
 * Adds `setJpegImageQuality` for controlling JPEG compression quality.
 * Updates minimum supported SDK version to Flutter 3.38/Dart 3.10.
 

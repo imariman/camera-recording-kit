@@ -17,14 +17,16 @@ finalized file. A request is never rewritten simply because a lens needs a
 fallback. Capability discovery is repeated after a camera switch; a profile
 found on one lens is not assumed for another.
 
-Candidate selection is resolution-first and frame-rate-second. A configured
-candidate succeeds only when native readback matches its width, height, and
-frame rate. Permission, access, and unrelated camera failures are errors, not
-fallbacks.
+Candidate selection is resolution-first, frame-rate-second, and codec-third.
+An HEVC request retries H.264 at the same size and frame rate before reducing
+either dimension. A configured candidate succeeds only when native readback
+matches its width, height, frame rate, and selected codec. Permission, access,
+and unrelated camera failures are errors, not fallbacks.
 
 Finalized-media inspection is best effort. Missing, malformed, unsupported, or
 timed-out inspection data must not invalidate a successfully finalized file.
-It reads media metadata and does not rewrite the recording.
+It reads media metadata and does not rewrite the recording. Known AVC and HEVC
+container identifiers are normalized to `h264` and `hevc` in shared metadata.
 
 Focus and exposure default to continuous automatic behavior. A lock is applied
 only after convergence and only if both focus and exposure accept it; otherwise

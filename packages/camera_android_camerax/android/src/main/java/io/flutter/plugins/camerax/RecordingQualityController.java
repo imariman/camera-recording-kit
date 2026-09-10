@@ -49,6 +49,7 @@ import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
@@ -71,6 +72,8 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
   private static final long FOCUS_TIMEOUT_SECONDS = 2L;
   private static final long APPLIED_PROFILE_TIMEOUT_MILLIS = 2_000L;
   private static final long APPLIED_PROFILE_POLL_MILLIS = 50L;
+  private static final String CODEC_H264 = "h264";
+  private static final String CODEC_HEVC = "hevc";
 
   @NonNull private final Context context;
   @NonNull private final ExecutorService mediaExecutor = Executors.newSingleThreadExecutor();
@@ -223,6 +226,9 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
         case "recordingQualityApplied":
           recordingQualityApplied(requireLong(call, "cameraId"), result);
           break;
+        case "setRecordingVideoCodec":
+          setRecordingVideoCodec(requireString(call, "codec"), result);
+          break;
         case "inspectRecordingMedia":
           inspectRecordingMedia(requireString(call, "path"), result);
           break;
@@ -314,6 +320,7 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
         profile.put("width", resolution.getWidth());
         profile.put("height", resolution.getHeight());
         profile.put("fps", fps);
+        profile.put("codecs", supportedRecordingCodecs());
         if (!profiles.contains(profile)) {
           profiles.add(profile);
         }
@@ -334,6 +341,30 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     capabilities.put("supportsFocusLock", supportsFocusLock(cameraInfo));
     capabilities.put("supportsExposureLock", supportsExposureLock(cameraInfo));
     return capabilities;
+  }
+
+  @NonNull
+  static List<String> supportedRecordingCodecs() {
+    // CameraX Recorder 1.6.1 selects the eventual codec internally and has no
+    // public codec-selection API. Restrict the extension contract to AVC so an
+    // HEVC preference can never be silently ignored.
+    return Collections.singletonList(CODEC_H264);
+  }
+
+  private void setRecordingVideoCodec(
+      @NonNull String codec, @NonNull MethodChannel.Result result) {
+    if (CODEC_H264.equals(codec)) {
+      result.success(null);
+      return;
+    }
+    if (CODEC_HEVC.equals(codec)) {
+      result.error(
+          "unsupportedVideoCodec",
+          "CameraX Recorder does not expose a public API for selecting HEVC video.",
+          null);
+      return;
+    }
+    throw new IllegalArgumentException("codec must be h264 or hevc.");
   }
 
   private boolean hasFrameRateRangeContaining(
@@ -487,6 +518,11 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     applied.put("width", resolution.getWidth());
     applied.put("height", resolution.getHeight());
     applied.put("fps", encoderFrameRate);
+    // Recorder does not expose the selected encoder codec. Do not infer it
+    // from the accepted preference; finalized container inspection is the
+    // first authoritative readback point.
+    applied.put("codec", null);
+    applied.put("codecSource", "unavailableUntilFinalized");
     applied.put("stabilizationEnabled", isStabilizationEnabled(boundCamera, videoCapture));
     result.success(applied);
   }

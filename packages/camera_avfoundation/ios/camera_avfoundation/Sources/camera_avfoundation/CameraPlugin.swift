@@ -22,6 +22,8 @@ public final class CameraPlugin: NSObject, FlutterPlugin {
   var camera: Camera?
   private var activeCameraID: Int64?
   private var recordingQualityChannel: FlutterMethodChannel?
+  /// One-shot codec selection consumed by the next native create request.
+  private var pendingRecordingVideoCodec: RecordingQuality.VideoCodec?
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = CameraPlugin(
@@ -125,6 +127,17 @@ public final class CameraPlugin: NSObject, FlutterPlugin {
           return
         }
         self.replyToRecordingQuality(result, with: .success(self.camera!.recordingQualityApplied()))
+      }
+    case "setRecordingVideoCodec":
+      guard let rawCodec = arguments?["codec"] as? String,
+        let codec = RecordingQuality.VideoCodec(rawValue: rawCodec.lowercased())
+      else {
+        result(qualityArgumentError("codec must be either 'h264' or 'hevc'."))
+        return
+      }
+      captureSessionQueue.async {
+        self.pendingRecordingVideoCodec = codec
+        DispatchQueue.main.async { result(nil) }
       }
     case "inspectRecordingMedia":
       guard let path = arguments?["path"] as? String else {
@@ -348,6 +361,8 @@ extension CameraPlugin: CameraApi {
     completion: @escaping (Result<Int64, any Error>) -> Void
   ) {
     let mediaSettingsAVWrapper = FLTCamMediaSettingsAVWrapper()
+    let recordingVideoCodec = pendingRecordingVideoCodec ?? .h264
+    pendingRecordingVideoCodec = nil
 
     let camConfiguration = CameraConfiguration(
       mediaSettings: settings,
@@ -357,7 +372,8 @@ extension CameraPlugin: CameraApi {
       captureSessionFactory: captureSessionFactory,
       captureSessionQueue: captureSessionQueue,
       captureDeviceInputFactory: captureDeviceInputFactory,
-      initialCameraName: name
+      initialCameraName: name,
+      recordingVideoCodec: recordingVideoCodec
     )
 
     do {

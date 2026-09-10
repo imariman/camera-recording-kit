@@ -195,6 +195,7 @@ class CameraSession: NSObject {
         let targetFps: Int
         let targetBitrate: Int
         let audioBitrate: Int
+        let videoCodec: RecordingQuality.VideoCodec
     }
 
     init(cameraId: Int, config: CameraConfig,
@@ -278,7 +279,8 @@ class CameraSession: NSObject {
             selectedFormat = try RecordingQuality.selectFormat(
                 for: device,
                 resolutionPreset: config.resolutionPreset,
-                framesPerSecond: config.targetFps
+                framesPerSecond: config.targetFps,
+                codec: config.videoCodec
             )
         } catch {
             let message = error.localizedDescription
@@ -551,6 +553,7 @@ class CameraSession: NSObject {
                     targetFps: self.config.targetFps,
                     targetBitrate: self.config.targetBitrate,
                     audioBitrate: self.config.audioBitrate,
+                    videoCodec: self.config.videoCodec,
                     enableAudio: enableAudio,
                     captureClock: captureClock
                 )
@@ -919,6 +922,10 @@ class CameraSession: NSObject {
                 "dimensionsSource": "captureSample",
                 "configuredWidth": Int(activeDimensions.width),
                 "configuredHeight": Int(activeDimensions.height),
+                // AVAssetWriter input settings are constructed with this exact
+                // codec and validated before recording starts.
+                "codec": self.config.videoCodec.rawValue,
+                "codecSource": "configuredAVAssetWriter",
 
             ]
             if let framesPerSecond = RecordingQuality.framesPerSecond(

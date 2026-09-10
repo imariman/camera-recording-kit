@@ -8,6 +8,7 @@ import 'package:camera_desktop/recording_quality.dart' as macos;
 
 import 'package:camera_recording/src/models/recorded_media_metadata.dart';
 import 'package:camera_recording/src/models/recording_capabilities.dart';
+import 'package:camera_recording/src/models/recording_profile.dart';
 
 /// Platform selection can be injected to verify routing without real hardware.
 enum RecordingBackend { android, ios, macos, unsupported }
@@ -46,13 +47,48 @@ class RecordingGateway {
     return RecordingCapabilities.fromJson(result);
   }
 
-  CameraController createController({
+  /// Creates and initializes one controller with the codec selection applied
+  /// immediately before Flutter issues the native create request.
+  Future<CameraController> createInitializedController({
     required CameraDescription description,
     required ResolutionPreset preset,
     required bool enableAudio,
+    required RecordingVideoCodec videoCodec,
     int? fps,
-  }) =>
-      CameraController(description, preset, enableAudio: enableAudio, fps: fps);
+    int? videoBitrate,
+    int? audioBitrate,
+  }) async {
+    await _prepareVideoCodec(videoCodec);
+    final controller = CameraController(
+      description,
+      preset,
+      enableAudio: enableAudio,
+      fps: fps,
+      videoBitrate: videoBitrate,
+      audioBitrate: audioBitrate,
+    );
+    try {
+      await controller.initialize();
+      return controller;
+    } catch (error, stackTrace) {
+      try {
+        await controller.dispose();
+      } catch (_) {}
+      Error.throwWithStackTrace(error, stackTrace);
+    }
+  }
+
+  Future<void> _prepareVideoCodec(RecordingVideoCodec codec) =>
+      switch (_backend) {
+        RecordingBackend.android => android.setRecordingVideoCodec(codec.name),
+        RecordingBackend.ios => ios.setRecordingVideoCodec(codec.name),
+        RecordingBackend.macos => macos.setRecordingVideoCodec(codec.name),
+        RecordingBackend.unsupported when codec == RecordingVideoCodec.h264 =>
+          Future<void>.value(),
+        RecordingBackend.unsupported => throw UnsupportedError(
+          'HEVC recording is unavailable on this platform.',
+        ),
+      };
 
   Future<Map<String, dynamic>> applied(int cameraId) async =>
       switch (_backend) {
@@ -84,8 +120,6 @@ class RecordingGateway {
   Future<void> setMirror(CameraController controller, bool mirrored) =>
       CameraDesktopPlugin().setMirror(controller.cameraId, mirrored);
 
-  Future<void> initialize(CameraController controller) =>
-      controller.initialize();
   Future<void> start(CameraController controller) =>
       controller.startVideoRecording();
   Future<void> pause(CameraController controller) =>

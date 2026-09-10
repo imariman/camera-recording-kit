@@ -4,6 +4,25 @@ import AVFoundation
 
 /// AVFoundation format discovery and finalized-file inspection for macOS.
 enum RecordingQuality {
+    enum VideoCodec: String, CaseIterable {
+        case h264
+        case hevc
+
+        var avVideoCodecType: AVVideoCodecType {
+            switch self {
+            case .h264: return .h264
+            case .hevc: return .hevc
+            }
+        }
+
+        var displayName: String {
+            switch self {
+            case .h264: return "H.264"
+            case .hevc: return "HEVC/H.265"
+            }
+        }
+    }
+
     struct Profile: Hashable {
         let width: Int32
         let height: Int32
@@ -13,6 +32,11 @@ enum RecordingQuality {
     struct SelectedFormat {
         let format: AVCaptureDevice.Format
         let profile: Profile
+    }
+
+    private struct SupportedProfile {
+        let profile: Profile
+        let codecs: [VideoCodec]
     }
 
     static let errorDomain = "dev.teleprompter.camera_desktop.recording_quality"
@@ -31,25 +55,26 @@ enum RecordingQuality {
 
     static func capabilities(cameraName: String) throws -> [String: Any] {
         let device = try resolveDevice(cameraName: cameraName)
-        let profiles = supportedProfiles(for: device)
+        let supportedProfiles = supportedProfilesWithCodecs(for: device)
         return [
             "cameraUniqueId": device.uniqueID,
             "cameraType": deviceKind(for: device),
-            "profiles": profiles.map {
+            "profiles": supportedProfiles.map {
                 [
-                    "width": Int($0.width),
-                    "height": Int($0.height),
-                    "fps": $0.framesPerSecond,
+                    "width": Int($0.profile.width),
+                    "height": Int($0.profile.height),
+                    "fps": $0.profile.framesPerSecond,
+                    "codecs": $0.codecs.map { $0.rawValue },
                 ]
             },
             "supportsFocusLock": device.isFocusModeSupported(.locked),
             "supportsExposureLock": device.isExposureModeSupported(.locked),
             "supportsFocusPoint": device.isFocusPointOfInterestSupported,
             "supportsExposurePoint": device.isExposurePointOfInterestSupported,
-            "supportsVideoStabilization": profiles.contains {
+            "supportsVideoStabilization": supportedProfiles.contains {
                 MacOSVideoStabilizer.availability(
-                    width: Int($0.width), height: Int($0.height),
-                    framesPerSecond: $0.framesPerSecond
+                    width: Int($0.profile.width), height: Int($0.profile.height),
+                    framesPerSecond: $0.profile.framesPerSecond
                 ).isAvailable
             },
             "supportsRecordingPause": true,
@@ -67,20 +92,30 @@ enum RecordingQuality {
     }
 
     static func supportedProfiles(for device: AVCaptureDevice) -> [Profile] {
-        // Probe each encoder profile once. Devices commonly expose several
-        // pixel formats for the same dimensions and rate.
-        let encodableProfiles = Set(requestedProfiles.filter(supportsEncoding))
-        var supported = Set<Profile>()
+        supportedProfilesWithCodecs(for: device).map { $0.profile }
+    }
+
+    private static func supportedProfilesWithCodecs(
+        for device: AVCaptureDevice
+    ) -> [SupportedProfile] {
+        var deviceProfiles = Set<Profile>()
         for format in device.formats {
             let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-            for profile in encodableProfiles where
+            for profile in requestedProfiles where
                 profile.width == dimensions.width && profile.height == dimensions.height &&
                 supports(frameRate: Double(profile.framesPerSecond), on: format)
             {
-                supported.insert(profile)
+                deviceProfiles.insert(profile)
             }
         }
-        return supported.sorted(by: profileSort)
+        return deviceProfiles.compactMap { profile -> SupportedProfile? in
+            let codecs = supportedCodecs(for: profile)
+            return codecs.isEmpty ? nil : SupportedProfile(profile: profile, codecs: codecs)
+        }.sorted { profileSort($0.profile, $1.profile) }
+    }
+
+    static func supportedCodecs(for profile: Profile) -> [VideoCodec] {
+        VideoCodec.allCases.filter { supportsEncoding(profile: profile, codec: $0) }
     }
 
     /// Selects an exact device format for the Flutter ResolutionPreset index.
@@ -89,7 +124,8 @@ enum RecordingQuality {
     static func selectFormat(
         for device: AVCaptureDevice,
         resolutionPreset: Int,
-        framesPerSecond: Int
+        framesPerSecond: Int,
+        codec: VideoCodec = .h264
     ) throws -> SelectedFormat {
         guard framesPerSecond == 30 || framesPerSecond == 60 else {
             throw unsupportedProfileError(
@@ -121,7 +157,7 @@ enum RecordingQuality {
             ]
         }
 
-        for target in targetProfiles where supportsEncoding(profile: target) {
+        for target in targetProfiles where supportsEncoding(profile: target, codec: codec) {
             if let format = device.formats.first(where: { candidate in
                 let dimensions = CMVideoFormatDescriptionGetDimensions(candidate.formatDescription)
                 return dimensions.width == target.width &&
@@ -139,7 +175,7 @@ enum RecordingQuality {
             requestedDescription = "the highest profile at \(framesPerSecond) FPS"
         }
         throw unsupportedProfileError(
-            "Camera '\(device.localizedName)' cannot record \(requestedDescription) with the H.264 MP4 encoder."
+            "Camera '\(device.localizedName)' cannot record \(requestedDescription) with the \(codec.displayName) MP4 encoder."
         )
     }
 
@@ -237,9 +273,9 @@ enum RecordingQuality {
         }
     }
 
-    static func supportsEncoding(profile: Profile) -> Bool {
+    static func supportsEncoding(profile: Profile, codec: VideoCodec = .h264) -> Bool {
         let settings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoCodecKey: codec.avVideoCodecType,
             AVVideoWidthKey: Int(profile.width),
             AVVideoHeightKey: Int(profile.height),
             AVVideoCompressionPropertiesKey: [

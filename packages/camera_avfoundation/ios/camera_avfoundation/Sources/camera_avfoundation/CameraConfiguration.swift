@@ -36,6 +36,7 @@ class CameraConfiguration {
   var videoDimensionsConverter: VideoDimensionsConverter
   var deviceOrientationProvider: DeviceOrientationProvider
   let initialCameraName: String
+  let recordingVideoCodec: RecordingQuality.VideoCodec
   var orientation: UIDeviceOrientation
 
   init(
@@ -46,7 +47,8 @@ class CameraConfiguration {
     captureSessionFactory: @escaping CaptureSessionFactory,
     captureSessionQueue: DispatchQueue,
     captureDeviceInputFactory: CaptureDeviceInputFactory,
-    initialCameraName: String
+    initialCameraName: String,
+    recordingVideoCodec: RecordingQuality.VideoCodec
   ) {
     self.mediaSettings = mediaSettings
     self.mediaSettingsWrapper = mediaSettingsWrapper
@@ -57,6 +59,7 @@ class CameraConfiguration {
     self.audioCaptureSession = captureSessionFactory()
     self.captureDeviceInputFactory = captureDeviceInputFactory
     self.initialCameraName = initialCameraName
+    self.recordingVideoCodec = recordingVideoCodec
     self.orientation = UIDevice.current.orientation
     self.deviceOrientationProvider = DefaultDeviceOrientationProvider()
 

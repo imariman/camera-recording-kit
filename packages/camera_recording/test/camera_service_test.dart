@@ -1,4 +1,5 @@
 import 'package:camera/camera.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:camera_recording/camera_recording.dart';
@@ -24,17 +25,14 @@ void main() {
     expect(service.canSwitchCamera, isFalse);
   });
 
-  test(
-    'enables switching when multiple cameras, including an external camera, are available',
-    () {
-      final service = CameraService(const [
-        frontCamera,
-        externalCamera,
-      ], capabilities: DefaultCameraPlatformCapabilities.macos);
+  test('enables switching when multiple cameras, including an external camera, are available', () {
+    final service = CameraService(const [
+      frontCamera,
+      externalCamera,
+    ], capabilities: DefaultCameraPlatformCapabilities.macos);
 
-      expect(service.canSwitchCamera, isTrue);
-    },
-  );
+    expect(service.canSwitchCamera, isTrue);
+  });
 
   test('resolves a persisted camera name from the available camera list', () {
     final service = CameraService(const [
@@ -357,6 +355,10 @@ class TestCameraController extends CameraController {
   final List<Offset> focusPoints = [];
   final List<Offset> exposurePoints = [];
   final List<VideoStabilizationMode> videoStabilizationModes = [];
+  final List<double> zoomLevels = [];
+  final List<double> exposureOffsets = [];
+  int orientationLockCalls = 0;
+  int orientationUnlockCalls = 0;
 
   @override
   Future<void> initialize() async {
@@ -435,5 +437,47 @@ class TestCameraController extends CameraController {
     bool allowFallback = true,
   }) async {
     videoStabilizationModes.add(mode);
+  }
+
+  @override
+  Future<double> getMinZoomLevel() async => 1;
+
+  @override
+  Future<double> getMaxZoomLevel() async => 4;
+
+  @override
+  Future<void> setZoomLevel(double zoom) async => zoomLevels.add(zoom);
+
+  @override
+  Future<double> getMinExposureOffset() async => -2;
+
+  @override
+  Future<double> getMaxExposureOffset() async => 2;
+
+  @override
+  Future<double> getExposureOffsetStepSize() async => 0.5;
+
+  @override
+  Future<double> setExposureOffset(double offset) async {
+    exposureOffsets.add(offset);
+    return offset;
+  }
+
+  @override
+  Future<void> lockCaptureOrientation([DeviceOrientation? orientation]) async {
+    orientationLockCalls++;
+    value = value.copyWith(
+      lockedCaptureOrientation: Optional<DeviceOrientation>.of(
+        orientation ?? value.deviceOrientation,
+      ),
+    );
+  }
+
+  @override
+  Future<void> unlockCaptureOrientation() async {
+    orientationUnlockCalls++;
+    value = value.copyWith(
+      lockedCaptureOrientation: const Optional<DeviceOrientation>.absent(),
+    );
   }
 }

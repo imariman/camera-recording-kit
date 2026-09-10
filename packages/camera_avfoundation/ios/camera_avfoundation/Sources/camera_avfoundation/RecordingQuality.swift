@@ -3,10 +3,27 @@
 import AVFoundation
 
 enum RecordingQuality {
+  enum VideoCodec: String, CaseIterable {
+    case h264
+    case hevc
+
+    var avVideoCodecType: AVVideoCodecType {
+      switch self {
+      case .h264: return .h264
+      case .hevc: return .hevc
+      }
+    }
+  }
+
   private struct Profile: Hashable {
     let width: Int32
     let height: Int32
     let framesPerSecond: Int
+  }
+
+  private struct SupportedProfile {
+    let profile: Profile
+    let codecs: [VideoCodec]
   }
 
   private static let requestedProfiles: [(width: Int32, height: Int32, frameRates: [Int])] = [
@@ -21,30 +38,49 @@ enum RecordingQuality {
       throw qualityError("Camera '\(cameraName)' is unavailable.")
     }
 
-    var profiles = Set<Profile>()
+    var deviceProfiles = Set<Profile>()
     for format in device.formats {
       let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
       for requested in requestedProfiles
       where dimensions.width == requested.width && dimensions.height == requested.height
       {
-        for fps in requested.frameRates
-        where supports(frameRate: Double(fps), on: format)
-          && supportsEncoding(width: dimensions.width, height: dimensions.height, fps: fps)
-        {
-          profiles.insert(Profile(width: dimensions.width, height: dimensions.height, framesPerSecond: fps))
+        for fps in requested.frameRates where supports(frameRate: Double(fps), on: format) {
+          deviceProfiles.insert(
+            Profile(
+              width: dimensions.width,
+              height: dimensions.height,
+              framesPerSecond: fps))
         }
       }
     }
 
-    let sortedProfiles = profiles.sorted {
-      if $0.width != $1.width { return $0.width < $1.width }
-      if $0.height != $1.height { return $0.height < $1.height }
-      return $0.framesPerSecond < $1.framesPerSecond
+    let supportedProfiles = deviceProfiles.compactMap { profile -> SupportedProfile? in
+      let codecs = VideoCodec.allCases.filter {
+        supportsEncoding(
+          width: profile.width,
+          height: profile.height,
+          fps: profile.framesPerSecond,
+          codec: $0)
+      }
+      return codecs.isEmpty ? nil : SupportedProfile(profile: profile, codecs: codecs)
+    }.sorted {
+      if $0.profile.width != $1.profile.width {
+        return $0.profile.width < $1.profile.width
+      }
+      if $0.profile.height != $1.profile.height {
+        return $0.profile.height < $1.profile.height
+      }
+      return $0.profile.framesPerSecond < $1.profile.framesPerSecond
     }
 
     return [
-      "profiles": sortedProfiles.map {
-        ["width": Int($0.width), "height": Int($0.height), "fps": $0.framesPerSecond]
+      "profiles": supportedProfiles.map { supported in
+        return [
+          "width": Int(supported.profile.width),
+          "height": Int(supported.profile.height),
+          "fps": supported.profile.framesPerSecond,
+          "codecs": supported.codecs.map(\.rawValue),
+        ]
       },
       "supportsFocusLock": device.isFocusModeSupported(.locked),
       "supportsExposureLock": device.isExposureModeSupported(.locked),
@@ -122,9 +158,14 @@ enum RecordingQuality {
     }
   }
 
-  private static func supportsEncoding(width: Int32, height: Int32, fps: Int) -> Bool {
+  static func supportsEncoding(
+    width: Int32,
+    height: Int32,
+    fps: Int,
+    codec: VideoCodec
+  ) -> Bool {
     let settings: [String: Any] = [
-      AVVideoCodecKey: AVVideoCodecType.h264,
+      AVVideoCodecKey: codec.avVideoCodecType,
       AVVideoWidthKey: Int(width),
       AVVideoHeightKey: Int(height),
       AVVideoCompressionPropertiesKey: [
@@ -136,6 +177,7 @@ enum RecordingQuality {
     guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .mp4) else {
       return false
     }
+    defer { try? FileManager.default.removeItem(at: outputURL) }
     return writer.canApply(outputSettings: settings, forMediaType: .video)
   }
 
