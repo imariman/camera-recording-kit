@@ -37,6 +37,12 @@ const fhd30 = RecordingVideoFormat(
 const fhd60 = RecordingVideoFormat(width: 1920, height: 1080, fps: 60);
 const uhd30 = RecordingVideoFormat(width: 3840, height: 2160, fps: 30);
 const uhd60 = RecordingVideoFormat(width: 3840, height: 2160, fps: 60);
+const fhd30Hevc = RecordingVideoFormat(
+  width: 1920,
+  height: 1080,
+  fps: 30,
+  codecs: {RecordingVideoCodec.hevc},
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -109,21 +115,30 @@ void main() {
       RecordingVideoCodec.h264,
       RecordingVideoCodec.hevc,
     });
+    final candidates = caps.candidates(
+      const RecordingProfile(
+        resolution: RecordingResolution.standardDefinition,
+        videoCodec: RecordingVideoCodec.hevc,
+      ),
+    );
+    expect(candidates, hasLength(2));
+    expect(candidates.map((candidate) => candidate.codecs.single), [
+      RecordingVideoCodec.hevc,
+      RecordingVideoCodec.h264,
+    ]);
+  });
+
+  test('resolution remains ahead of preferred codec during fallback', () {
+    const caps = RecordingCapabilities(profiles: [fhd30Hevc, uhd30]);
+
     expect(
       caps.candidates(
         const RecordingProfile(
-          resolution: RecordingResolution.standardDefinition,
+          resolution: RecordingResolution.ultraHd,
           videoCodec: RecordingVideoCodec.hevc,
         ),
       ),
-      [
-        const RecordingVideoFormat(
-          width: 640,
-          height: 480,
-          fps: 30,
-          codecs: {RecordingVideoCodec.h264, RecordingVideoCodec.hevc},
-        ),
-      ],
+      [uhd30, fhd30Hevc],
     );
   });
 
@@ -160,39 +175,42 @@ void main() {
     expect(gateway.factory.maxActiveControllers, 1);
   });
 
-  test('macOS internal 1080p fallback restores the remembered 4K intent externally', () async {
-    final gateway = QualityFakeGateway();
-    final service = CameraService(
-      const [macInternal, macExternal],
-      recordingGateway: gateway,
-      capabilities: DefaultCameraPlatformCapabilities.macos,
-    );
-    addTearDown(service.dispose);
-    const request = RecordingProfile(
-      resolution: RecordingResolution.ultraHd,
-      fps: 60,
-    );
+  test(
+    'macOS internal 1080p fallback restores the remembered 4K intent externally',
+    () async {
+      final gateway = QualityFakeGateway();
+      final service = CameraService(
+        const [macInternal, macExternal],
+        recordingGateway: gateway,
+        capabilities: DefaultCameraPlatformCapabilities.macos,
+      );
+      addTearDown(service.dispose);
+      const request = RecordingProfile(
+        resolution: RecordingResolution.ultraHd,
+        fps: 60,
+      );
 
-    await service.initialize(front: true, recordingProfile: request);
+      await service.initialize(front: true, recordingProfile: request);
 
-    expect(service.recordingProfile, request);
-    expect(service.appliedProfile?.format, fhd60);
-    expect(service.appliedProfile?.fallbackReason, 'unsupportedProfile');
-    expect(
-      service.recordingCapabilities.resolutions,
-      isNot(contains(RecordingResolution.ultraHd)),
-    );
+      expect(service.recordingProfile, request);
+      expect(service.appliedProfile?.format, fhd60);
+      expect(service.appliedProfile?.fallbackReason, 'unsupportedProfile');
+      expect(
+        service.recordingCapabilities.resolutions,
+        isNot(contains(RecordingResolution.ultraHd)),
+      );
 
-    await service.switchCamera(recordingProfile: request);
+      await service.switchCamera(recordingProfile: request);
 
-    expect(service.recordingProfile, request);
-    expect(service.appliedProfile?.format, uhd60);
-    expect(service.appliedProfile?.fallbackReason, isNull);
-    expect(
-      service.recordingCapabilities.resolutions,
-      contains(RecordingResolution.ultraHd),
-    );
-  });
+      expect(service.recordingProfile, request);
+      expect(service.appliedProfile?.format, uhd60);
+      expect(service.appliedProfile?.fallbackReason, isNull);
+      expect(
+        service.recordingCapabilities.resolutions,
+        contains(RecordingResolution.ultraHd),
+      );
+    },
+  );
 
   for (final supportsQualitySelection in [false, true]) {
     test(
@@ -403,6 +421,96 @@ void main() {
     expect(service.appliedProfile?.fallbackReason, 'unsupportedProfile');
   });
 
+  test('HEVC fallback keeps a higher-resolution H.264 format', () async {
+    final gateway = QualityFakeGateway()
+      ..capabilitiesOverride = const RecordingCapabilities(
+        profiles: [fhd30Hevc, uhd30],
+      );
+    final service = CameraService(
+      [back],
+      recordingGateway: gateway,
+      capabilities: DefaultCameraPlatformCapabilities.cameraCapable,
+    );
+    addTearDown(service.dispose);
+
+    await service.initialize(
+      front: false,
+      recordingProfile: const RecordingProfile(
+        resolution: RecordingResolution.ultraHd,
+        videoCodec: RecordingVideoCodec.hevc,
+      ),
+    );
+
+    expect(service.appliedProfile?.format, uhd30);
+    expect(gateway.attempted, [uhd30]);
+    expect(gateway.attemptedCodecs, [RecordingVideoCodec.h264]);
+    expect(service.appliedProfile?.fallbackReason, 'unsupportedProfile');
+  });
+
+  test(
+    'a rejected HEVC configuration retries H.264 at the same size',
+    () async {
+      final gateway = QualityFakeGateway()..rejectHevc = true;
+      final service = CameraService(
+        [back],
+        recordingGateway: gateway,
+        capabilities: DefaultCameraPlatformCapabilities.cameraCapable,
+      );
+      addTearDown(service.dispose);
+
+      await service.initialize(
+        front: false,
+        recordingProfile: const RecordingProfile(
+          resolution: RecordingResolution.fullHd,
+          videoCodec: RecordingVideoCodec.hevc,
+        ),
+      );
+
+      expect(gateway.attempted, [fhd30, fhd30]);
+      expect(gateway.attemptedCodecs, [
+        RecordingVideoCodec.hevc,
+        RecordingVideoCodec.h264,
+      ]);
+      expect(service.appliedProfile?.format, fhd30);
+      expect(service.appliedProfile?.fallbackReason, 'configurationRejected');
+    },
+  );
+
+  test('automatic bitrate leaves both encoder defaults untouched', () async {
+    final gateway = QualityFakeGateway();
+    final service = CameraService(
+      [back],
+      recordingGateway: gateway,
+      capabilities: DefaultCameraPlatformCapabilities.cameraCapable,
+    );
+    addTearDown(service.dispose);
+
+    await service.initialize(front: false);
+
+    expect(gateway.videoBitrates.last, isNull);
+    expect(gateway.audioBitrates.last, isNull);
+  });
+
+  test('an explicit bitrate preset configures video and audio', () async {
+    final gateway = QualityFakeGateway();
+    final service = CameraService(
+      [back],
+      recordingGateway: gateway,
+      capabilities: DefaultCameraPlatformCapabilities.cameraCapable,
+    );
+    addTearDown(service.dispose);
+
+    await service.initialize(
+      front: false,
+      recordingProfile: const RecordingProfile(
+        bitratePreset: RecordingBitratePreset.balanced,
+      ),
+    );
+
+    expect(gateway.videoBitrates.last, 35000000);
+    expect(gateway.audioBitrates.last, RecordingStorageEstimate.audioBitrate);
+  });
+
   test(
     'failed focus convergence leaves auto focus and exposure active',
     () async {
@@ -513,7 +621,9 @@ class QualityFakeGateway extends RecordingGateway {
   RecordingVideoFormat current = fhd30;
   bool qualitySelection = true;
   bool reject60 = false;
+  bool rejectHevc = false;
   bool advertiseHevc = true;
+  RecordingCapabilities? capabilitiesOverride;
   bool focusConverged = true;
   Object? initializeError;
   Object? inspectionError;
@@ -525,6 +635,7 @@ class QualityFakeGateway extends RecordingGateway {
   int pauses = 0;
   int resumes = 0;
   RecordingVideoCodec currentCodec = RecordingVideoCodec.h264;
+  final List<RecordingVideoCodec> attemptedCodecs = [];
   final List<int?> videoBitrates = [];
   final List<int?> audioBitrates = [];
   final List<bool> audioSelections = [];
@@ -543,12 +654,9 @@ class QualityFakeGateway extends RecordingGateway {
   @override
   bool get supportsQualitySelection => qualitySelection;
   @override
-  Future<void> prepareVideoCodec(RecordingVideoCodec codec) async {
-    currentCodec = codec;
-  }
-
-  @override
   Future<RecordingCapabilities> capabilities(String cameraName) async {
+    final overridden = capabilitiesOverride;
+    if (overridden != null) return overridden;
     final advertisedFhd30 = advertiseHevc
         ? fhd30
         : const RecordingVideoFormat(width: 1920, height: 1080, fps: 30);
@@ -564,14 +672,17 @@ class QualityFakeGateway extends RecordingGateway {
   }
 
   @override
-  CameraController createController({
+  Future<CameraController> createInitializedController({
     required CameraDescription description,
     required ResolutionPreset preset,
     required bool enableAudio,
+    required RecordingVideoCodec videoCodec,
     int? fps,
     int? videoBitrate,
     int? audioBitrate,
-  }) {
+  }) async {
+    currentCodec = videoCodec;
+    attemptedCodecs.add(videoCodec);
     current = switch (preset) {
       ResolutionPreset.ultraHigh => fps == 60 ? uhd60 : uhd30,
       ResolutionPreset.veryHigh => fps == 60 ? fhd60 : fhd30,
@@ -581,18 +692,29 @@ class QualityFakeGateway extends RecordingGateway {
     videoBitrates.add(videoBitrate);
     audioBitrates.add(audioBitrate);
     audioSelections.add(enableAudio);
-    return factory.create(
+    final controller = factory.create(
       description: description,
       resolutionPreset: preset,
       enableAudio: enableAudio,
     );
+    try {
+      await initialize(controller);
+      return controller;
+    } catch (error, stackTrace) {
+      try {
+        await controller.dispose();
+      } catch (_) {}
+      Error.throwWithStackTrace(error, stackTrace);
+    }
   }
 
-  @override
   Future<void> initialize(CameraController controller) async {
     final error = initializeError;
     if (error != null) throw error;
     if (reject60 && current.fps == 60) {
+      throw CameraException('unsupportedRecordingProfile', 'Test rejection');
+    }
+    if (rejectHevc && currentCodec == RecordingVideoCodec.hevc) {
       throw CameraException('unsupportedRecordingProfile', 'Test rejection');
     }
     final gate = _deferredInitialize;

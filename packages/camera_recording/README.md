@@ -35,4 +35,7 @@ support, so callers can hide combinations the selected camera cannot apply.
 
 HEVC is selectable only when the native backend validates it for the exact
 camera format. CameraX currently advertises H.264 because its public Recorder
-API does not provide deterministic codec selection.
+API does not provide deterministic codec selection. If an HEVC configuration
+is rejected, H.264 is retried at the same resolution and frame rate before the
+service falls back to a smaller format. Finalized AVC/HEVC codec identifiers
+are normalized to `h264`/`hevc` in `RecordedMediaMetadata`.

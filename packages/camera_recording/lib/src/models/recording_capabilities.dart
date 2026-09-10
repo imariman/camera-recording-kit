@@ -142,19 +142,45 @@ class RecordingCapabilities {
         ...format.codecs,
   };
 
-  /// Resolution first, then FPS. Never upgrades an explicit target.
+  /// Resolution first, then FPS, then the requested codec. Never upgrades an
+  /// explicit target. HEVC requests retain an H.264 attempt for the same exact
+  /// format before falling back to a lower resolution or frame rate.
   List<RecordingVideoFormat> candidates(RecordingProfile request) {
-    final formats = profiles
-        .where(
-          (format) =>
-              format.shortSide <= request.resolution.height &&
-              (format.fps == request.fps || format.fps == 30) &&
-              format.supportsCodec(request.videoCodec),
-        )
-        .toList();
+    final formats = <RecordingVideoFormat>[];
+    for (final format in profiles) {
+      if (format.shortSide > request.resolution.height ||
+          (format.fps != request.fps && format.fps != 30)) {
+        continue;
+      }
+      if (format.supportsCodec(request.videoCodec)) {
+        formats.add(
+          RecordingVideoFormat(
+            width: format.width,
+            height: format.height,
+            fps: format.fps,
+            codecs: {request.videoCodec},
+          ),
+        );
+      }
+      if (request.videoCodec == RecordingVideoCodec.hevc &&
+          format.supportsCodec(RecordingVideoCodec.h264)) {
+        formats.add(
+          RecordingVideoFormat(
+            width: format.width,
+            height: format.height,
+            fps: format.fps,
+          ),
+        );
+      }
+    }
     formats.sort((a, b) {
       final resolution = b.shortSide.compareTo(a.shortSide);
-      return resolution != 0 ? resolution : b.fps.compareTo(a.fps);
+      if (resolution != 0) return resolution;
+      final frameRate = b.fps.compareTo(a.fps);
+      if (frameRate != 0) return frameRate;
+      final aPreferred = a.supportsCodec(request.videoCodec) ? 1 : 0;
+      final bPreferred = b.supportsCodec(request.videoCodec) ? 1 : 0;
+      return bPreferred.compareTo(aPreferred);
     });
     return formats;
   }

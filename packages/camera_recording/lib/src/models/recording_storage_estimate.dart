@@ -14,6 +14,12 @@ abstract final class RecordingStorageEstimate {
       ? null
       : videoBitrate(profile, format);
 
+  static int? requestedAudioBitrate(RecordingProfile profile) =>
+      profile.recordAudio &&
+          profile.bitratePreset != RecordingBitratePreset.automatic
+      ? audioBitrate
+      : null;
+
   static int videoBitrate(
     RecordingProfile profile,
     RecordingVideoFormat format,

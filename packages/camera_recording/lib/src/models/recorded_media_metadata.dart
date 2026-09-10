@@ -37,6 +37,9 @@ class RecordedMediaMetadata {
   final String? fpsSource;
   final int? bitrate;
   final String? bitrateSource;
+
+  /// Platform values parsed by [tryParse] are normalized to `h264` or `hevc`
+  /// for known AVC/HEVC identifiers.
   final String? codec;
   final String? mimeType;
   final int? fileSizeBytes;
@@ -133,7 +136,7 @@ class RecordedMediaMetadata {
         'estimated',
         'measured',
       }),
-      codec: _nonEmptyString(raw['codec']),
+      codec: _normalizedCodec(raw['codec']),
       mimeType: _nonEmptyString(raw['mimeType']),
       fileSizeBytes: _positiveInteger(raw['fileSizeBytes']),
       cameraName: _nonEmptyString(raw['cameraName']),
@@ -178,6 +181,28 @@ class RecordedMediaMetadata {
   static String? _allowedString(Object? value, Set<String> allowed) {
     final parsed = _nonEmptyString(value);
     return parsed != null && allowed.contains(parsed) ? parsed : null;
+  }
+
+  static String? _normalizedCodec(Object? value) {
+    final parsed = _nonEmptyString(value);
+    if (parsed == null) return null;
+    final normalized = parsed.toLowerCase();
+    if (normalized == 'h264' ||
+        normalized == 'avc' ||
+        normalized == 'video/avc' ||
+        normalized.startsWith('avc1') ||
+        normalized.startsWith('avc3')) {
+      return 'h264';
+    }
+    if (normalized == 'h265' ||
+        normalized == 'hevc' ||
+        normalized == 'video/hevc' ||
+        normalized == 'video/h265' ||
+        normalized.startsWith('hvc1') ||
+        normalized.startsWith('hev1')) {
+      return 'hevc';
+    }
+    return parsed;
   }
 
   @override

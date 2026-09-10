@@ -12,11 +12,12 @@ import 'package:camera_recording/src/models/recording_result.dart';
 import 'package:camera_recording/src/models/recording_storage_estimate.dart';
 import 'package:camera_recording/src/services/recording_gateway.dart';
 
-typedef CameraControllerFactory = CameraController Function({
-  required CameraDescription description,
-  required ResolutionPreset resolutionPreset,
-  required bool enableAudio,
-});
+typedef CameraControllerFactory =
+    CameraController Function({
+      required CameraDescription description,
+      required ResolutionPreset resolutionPreset,
+      required bool enableAudio,
+    });
 
 /// When starting a new controller and restoring the previous camera/profile
 /// both fail, the service has no usable preview. Both errors are retained for diagnostics.
@@ -266,22 +267,23 @@ class CameraService {
     _focusLockUnavailable = false;
     if (!supportsQualitySelection) {
       final factory = _controllerFactory;
-      if (factory == null) {
-        await _gateway.prepareVideoCodec(recordingProfile.videoCodec);
-      }
-      final controller = factory != null
-          ? factory(
-              description: description,
-              resolutionPreset: resolutionPresetFor(recordingProfile.quality),
-              enableAudio: recordingProfile.recordAudio,
-            )
-          : _gateway.createController(
-              description: description,
-              preset: ResolutionPreset.max,
-              enableAudio: recordingProfile.recordAudio,
-            );
+      CameraController? controller;
       try {
-        await _gateway.initialize(controller);
+        if (factory != null) {
+          controller = factory(
+            description: description,
+            resolutionPreset: resolutionPresetFor(recordingProfile.quality),
+            enableAudio: recordingProfile.recordAudio,
+          );
+          await controller.initialize();
+        } else {
+          controller = await _gateway.createInitializedController(
+            description: description,
+            preset: ResolutionPreset.max,
+            enableAudio: recordingProfile.recordAudio,
+            videoCodec: recordingProfile.videoCodec,
+          );
+        }
         if (_capabilities.usesDesktopCameraBackend) {
           await _gateway.setMirror(controller, false);
         }
@@ -296,21 +298,13 @@ class CameraService {
         _appliedProfile = null;
         return controller;
       } catch (_) {
-        await _disposeBestEffort(controller);
+        if (controller != null) await _disposeBestEffort(controller);
         rethrow;
       }
     }
 
     final capabilities = await _gateway.capabilities(description.name);
-    var effectiveProfile = recordingProfile;
-    var candidates = capabilities.candidates(effectiveProfile);
-    if (candidates.isEmpty &&
-        recordingProfile.videoCodec != RecordingVideoCodec.h264) {
-      effectiveProfile = recordingProfile.copyWith(
-        videoCodec: RecordingVideoCodec.h264,
-      );
-      candidates = capabilities.candidates(effectiveProfile);
-    }
+    final candidates = capabilities.candidates(recordingProfile);
     if (candidates.isEmpty) {
       throw CameraException(
         'unsupportedRecordingProfile',
@@ -323,22 +317,28 @@ class CameraService {
         throw CameraException('disposed', 'Camera was disposed.');
       }
       final candidate = candidates[index];
-      await _gateway.prepareVideoCodec(effectiveProfile.videoCodec);
-      final controller = _gateway.createController(
-        description: description,
-        preset: presetForFormat(candidate),
-        enableAudio: recordingProfile.recordAudio,
-        fps: candidate.fps,
-        videoBitrate: RecordingStorageEstimate.requestedVideoBitrate(
-          effectiveProfile,
-          candidate,
-        ),
-        audioBitrate: recordingProfile.recordAudio
-            ? RecordingStorageEstimate.audioBitrate
-            : null,
+      final selectedCodec = candidate.supportsCodec(recordingProfile.videoCodec)
+          ? recordingProfile.videoCodec
+          : RecordingVideoCodec.h264;
+      final effectiveProfile = recordingProfile.copyWith(
+        videoCodec: selectedCodec,
       );
+      CameraController? controller;
       try {
-        await _gateway.initialize(controller);
+        controller = await _gateway.createInitializedController(
+          description: description,
+          preset: presetForFormat(candidate),
+          enableAudio: recordingProfile.recordAudio,
+          videoCodec: selectedCodec,
+          fps: candidate.fps,
+          videoBitrate: RecordingStorageEstimate.requestedVideoBitrate(
+            effectiveProfile,
+            candidate,
+          ),
+          audioBitrate: RecordingStorageEstimate.requestedAudioBitrate(
+            recordingProfile,
+          ),
+        );
         if (_capabilities.usesDesktopCameraBackend) {
           await _gateway.setMirror(controller, false);
         }
@@ -381,7 +381,7 @@ class CameraService {
         );
         return controller;
       } catch (error) {
-        await _disposeBestEffort(controller);
+        if (controller != null) await _disposeBestEffort(controller);
         if (!_isUnsupportedConfiguration(error)) rethrow;
         lastError = error;
       }

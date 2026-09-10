@@ -22,9 +22,8 @@ public final class CameraPlugin: NSObject, FlutterPlugin {
   var camera: Camera?
   private var activeCameraID: Int64?
   private var recordingQualityChannel: FlutterMethodChannel?
-  /// Selected before a controller is created, since AVAssetWriter settings are
-  /// owned by the single active camera pipeline.
-  private var recordingVideoCodec: RecordingQuality.VideoCodec = .h264
+  /// One-shot codec selection consumed by the next native create request.
+  private var pendingRecordingVideoCodec: RecordingQuality.VideoCodec?
 
   public static func register(with registrar: FlutterPluginRegistrar) {
     let instance = CameraPlugin(
@@ -137,16 +136,7 @@ public final class CameraPlugin: NSObject, FlutterPlugin {
         return
       }
       captureSessionQueue.async {
-        guard self.camera == nil else {
-          DispatchQueue.main.async {
-            result(FlutterError(
-              code: "camera_already_created",
-              message: "Set the recording codec before creating a camera controller.",
-              details: nil))
-          }
-          return
-        }
-        self.recordingVideoCodec = codec
+        self.pendingRecordingVideoCodec = codec
         DispatchQueue.main.async { result(nil) }
       }
     case "inspectRecordingMedia":
@@ -371,6 +361,8 @@ extension CameraPlugin: CameraApi {
     completion: @escaping (Result<Int64, any Error>) -> Void
   ) {
     let mediaSettingsAVWrapper = FLTCamMediaSettingsAVWrapper()
+    let recordingVideoCodec = pendingRecordingVideoCodec ?? .h264
+    pendingRecordingVideoCodec = nil
 
     let camConfiguration = CameraConfiguration(
       mediaSettings: settings,

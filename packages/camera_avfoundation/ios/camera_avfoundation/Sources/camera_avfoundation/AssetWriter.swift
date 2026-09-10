@@ -15,6 +15,7 @@ protocol AssetWriter: NSObjectProtocol {
   func finishWriting(completionHandler handler: @escaping @Sendable () -> Void)
   func startSession(atSourceTime startTime: CMTime)
   func add(_ input: AVAssetWriterInput)
+  func canApply(outputSettings: [String: Any]?, forMediaType mediaType: AVMediaType) -> Bool
 }
 
 /// A protocol that is a direct passthrough to `AVAssetWriterInput`. It is used to allow for mocking

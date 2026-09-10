@@ -34,6 +34,11 @@ enum RecordingQuality {
         let profile: Profile
     }
 
+    private struct SupportedProfile {
+        let profile: Profile
+        let codecs: [VideoCodec]
+    }
+
     static let errorDomain = "dev.teleprompter.camera_desktop.recording_quality"
 
     /// The app intentionally exposes only SDR profiles through 4K. 640x480p30
@@ -50,26 +55,26 @@ enum RecordingQuality {
 
     static func capabilities(cameraName: String) throws -> [String: Any] {
         let device = try resolveDevice(cameraName: cameraName)
-        let profiles = supportedProfiles(for: device)
+        let supportedProfiles = supportedProfilesWithCodecs(for: device)
         return [
             "cameraUniqueId": device.uniqueID,
             "cameraType": deviceKind(for: device),
-            "profiles": profiles.map {
+            "profiles": supportedProfiles.map {
                 [
-                    "width": Int($0.width),
-                    "height": Int($0.height),
-                    "fps": $0.framesPerSecond,
-                    "codecs": supportedCodecs(for: $0).map { $0.rawValue },
+                    "width": Int($0.profile.width),
+                    "height": Int($0.profile.height),
+                    "fps": $0.profile.framesPerSecond,
+                    "codecs": $0.codecs.map { $0.rawValue },
                 ]
             },
             "supportsFocusLock": device.isFocusModeSupported(.locked),
             "supportsExposureLock": device.isExposureModeSupported(.locked),
             "supportsFocusPoint": device.isFocusPointOfInterestSupported,
             "supportsExposurePoint": device.isExposurePointOfInterestSupported,
-            "supportsVideoStabilization": profiles.contains {
+            "supportsVideoStabilization": supportedProfiles.contains {
                 MacOSVideoStabilizer.availability(
-                    width: Int($0.width), height: Int($0.height),
-                    framesPerSecond: $0.framesPerSecond
+                    width: Int($0.profile.width), height: Int($0.profile.height),
+                    framesPerSecond: $0.profile.framesPerSecond
                 ).isAvailable
             },
             "supportsRecordingPause": true,
@@ -87,22 +92,26 @@ enum RecordingQuality {
     }
 
     static func supportedProfiles(for device: AVCaptureDevice) -> [Profile] {
-        // Probe each encoder profile once. Devices commonly expose several
-        // pixel formats for the same dimensions and rate.
-        let encodableProfiles = Set(requestedProfiles.filter { profile in
-            !supportedCodecs(for: profile).isEmpty
-        })
-        var supported = Set<Profile>()
+        supportedProfilesWithCodecs(for: device).map { $0.profile }
+    }
+
+    private static func supportedProfilesWithCodecs(
+        for device: AVCaptureDevice
+    ) -> [SupportedProfile] {
+        var deviceProfiles = Set<Profile>()
         for format in device.formats {
             let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-            for profile in encodableProfiles where
+            for profile in requestedProfiles where
                 profile.width == dimensions.width && profile.height == dimensions.height &&
                 supports(frameRate: Double(profile.framesPerSecond), on: format)
             {
-                supported.insert(profile)
+                deviceProfiles.insert(profile)
             }
         }
-        return supported.sorted(by: profileSort)
+        return deviceProfiles.compactMap { profile -> SupportedProfile? in
+            let codecs = supportedCodecs(for: profile)
+            return codecs.isEmpty ? nil : SupportedProfile(profile: profile, codecs: codecs)
+        }.sorted { profileSort($0.profile, $1.profile) }
     }
 
     static func supportedCodecs(for profile: Profile) -> [VideoCodec] {

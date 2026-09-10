@@ -647,14 +647,12 @@ final class DefaultCamera: NSObject, Camera {
     }
 
     guard var videoSettings = mediaSettingsAVWrapper.recommendedVideoSettingsForAssetWriter(
-      withFileType:
-        AVFileType.mp4,
+      withVideoCodecType: recordingVideoCodec.avVideoCodecType,
+      fileType: AVFileType.mp4,
       for: captureVideoOutput
     ) else {
       return false
     }
-
-    videoSettings[AVVideoCodecKey] = recordingVideoCodec.avVideoCodecType
 
     if mediaSettings.videoBitrate != nil || framesPerSecond != nil {
       var compressionProperties = videoSettings[AVVideoCompressionPropertiesKey] as? [String: Any]
@@ -671,7 +669,7 @@ final class DefaultCamera: NSObject, Camera {
       videoSettings[AVVideoCompressionPropertiesKey] = compressionProperties
     }
 
-    guard RecordingQuality.supportsEncoding(outputSettings: videoSettings) else {
+    guard videoWriter.canApply(outputSettings: videoSettings, forMediaType: .video) else {
       return false
     }
 

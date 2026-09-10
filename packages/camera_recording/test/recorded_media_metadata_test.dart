@@ -60,7 +60,7 @@ void main() {
     expect(parsed?.fpsSource, isNull);
     expect(parsed?.bitrate, 8400000);
     expect(parsed?.bitrateSource, 'measured');
-    expect(parsed?.codec, 'h265');
+    expect(parsed?.codec, 'hevc');
     expect(parsed?.mimeType, isNull);
     expect(parsed?.fileSizeBytes, isNull);
     expect(parsed?.lensDirection, 'front');
@@ -68,6 +68,22 @@ void main() {
     expect(parsed?.configuredHeight, isNull);
     expect(parsed?.configuredFps, 60);
     expect(parsed?.fallbackReason, 'compactFallback');
+  });
+
+  test('platform codec identifiers normalize to one shared vocabulary', () {
+    for (final codec in ['avc', 'avc1', 'avc1.640028', 'avc3', 'video/avc']) {
+      expect(RecordedMediaMetadata.tryParse({'codec': codec})?.codec, 'h264');
+    }
+    for (final codec in [
+      'h265',
+      'hvc1',
+      'hvc1.1.6.L93.B0',
+      'hev1',
+      'video/hevc',
+    ]) {
+      expect(RecordedMediaMetadata.tryParse({'codec': codec})?.codec, 'hevc');
+    }
+    expect(RecordedMediaMetadata.tryParse({'codec': 'vp9'})?.codec, 'vp9');
   });
 
   test('capture fields can be attached to inspected metadata', () {

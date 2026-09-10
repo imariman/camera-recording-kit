@@ -21,6 +21,11 @@ enum RecordingQuality {
     let framesPerSecond: Int
   }
 
+  private struct SupportedProfile {
+    let profile: Profile
+    let codecs: [VideoCodec]
+  }
+
   private static let requestedProfiles: [(width: Int32, height: Int32, frameRates: [Int])] = [
     (640, 480, [30]),
     (1280, 720, [30, 60]),
@@ -33,47 +38,48 @@ enum RecordingQuality {
       throw qualityError("Camera '\(cameraName)' is unavailable.")
     }
 
-    var profiles = Set<Profile>()
+    var deviceProfiles = Set<Profile>()
     for format in device.formats {
       let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
       for requested in requestedProfiles
       where dimensions.width == requested.width && dimensions.height == requested.height
       {
         for fps in requested.frameRates where supports(frameRate: Double(fps), on: format) {
-          let codecs = VideoCodec.allCases.filter {
-            supportsEncoding(
+          deviceProfiles.insert(
+            Profile(
               width: dimensions.width,
               height: dimensions.height,
-              fps: fps,
-              codec: $0)
-          }
-          if !codecs.isEmpty {
-            profiles.insert(Profile(width: dimensions.width, height: dimensions.height, framesPerSecond: fps))
-          }
+              framesPerSecond: fps))
         }
       }
     }
 
-    let sortedProfiles = profiles.sorted {
-      if $0.width != $1.width { return $0.width < $1.width }
-      if $0.height != $1.height { return $0.height < $1.height }
-      return $0.framesPerSecond < $1.framesPerSecond
+    let supportedProfiles = deviceProfiles.compactMap { profile -> SupportedProfile? in
+      let codecs = VideoCodec.allCases.filter {
+        supportsEncoding(
+          width: profile.width,
+          height: profile.height,
+          fps: profile.framesPerSecond,
+          codec: $0)
+      }
+      return codecs.isEmpty ? nil : SupportedProfile(profile: profile, codecs: codecs)
+    }.sorted {
+      if $0.profile.width != $1.profile.width {
+        return $0.profile.width < $1.profile.width
+      }
+      if $0.profile.height != $1.profile.height {
+        return $0.profile.height < $1.profile.height
+      }
+      return $0.profile.framesPerSecond < $1.profile.framesPerSecond
     }
 
     return [
-      "profiles": sortedProfiles.map { profile in
-        let codecs = VideoCodec.allCases.filter {
-          supportsEncoding(
-            width: profile.width,
-            height: profile.height,
-            fps: profile.framesPerSecond,
-            codec: $0)
-        }
+      "profiles": supportedProfiles.map { supported in
         return [
-          "width": Int(profile.width),
-          "height": Int(profile.height),
-          "fps": profile.framesPerSecond,
-          "codecs": codecs.map(\.rawValue),
+          "width": Int(supported.profile.width),
+          "height": Int(supported.profile.height),
+          "fps": supported.profile.framesPerSecond,
+          "codecs": supported.codecs.map(\.rawValue),
         ]
       },
       "supportsFocusLock": device.isFocusModeSupported(.locked),
@@ -175,19 +181,6 @@ enum RecordingQuality {
     return writer.canApply(outputSettings: settings, forMediaType: .video)
   }
 
-  /// Checks that a fully configured Asset Writer input supports the requested
-  /// codec. This is intentionally performed before recording starts so an
-  /// unsupported HEVC selection cannot produce a partially initialized writer.
-  static func supportsEncoding(outputSettings: [String: Any]) -> Bool {
-    let outputURL = FileManager.default.temporaryDirectory
-      .appendingPathComponent("recording-quality-\(UUID().uuidString).mp4")
-    guard let writer = try? AVAssetWriter(outputURL: outputURL, fileType: .mp4) else {
-      return false
-    }
-    defer { try? FileManager.default.removeItem(at: outputURL) }
-    return writer.canApply(outputSettings: outputSettings, forMediaType: .video)
-  }
-
   private static func measuredFrameRate(
     asset: AVAsset,
     track: AVAssetTrack
@@ -233,12 +226,7 @@ enum RecordingQuality {
       Character(UnicodeScalar((subtype >> 8) & 0xff)!),
       Character(UnicodeScalar(subtype & 0xff)!),
     ]
-    let fourCharacterCode = String(characters).trimmingCharacters(in: .whitespaces)
-    switch fourCharacterCode {
-    case "avc1": return VideoCodec.h264.rawValue
-    case "hvc1", "hev1": return VideoCodec.hevc.rawValue
-    default: return fourCharacterCode
-    }
+    return String(characters).trimmingCharacters(in: .whitespaces)
   }
 
   private static func rotationDegrees(for transform: CGAffineTransform) -> Int {
