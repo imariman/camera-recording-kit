@@ -269,6 +269,9 @@ class RecordHandler: NSObject {
     }
 
     /// Stops recording and finalizes the file.
+    ///
+    /// When no file can be produced, the partially written temporary file is
+    /// deleted before `completion` receives `nil`.
     /// - Parameter completion: Called with the output file path on success, or nil on failure.
     func stopRecording(completion: @escaping (String?) -> Void) {
         lock.lock()
@@ -282,6 +285,7 @@ class RecordHandler: NSObject {
         let vInput = videoInput
         let aInput = audioInput
         let path = outputPath
+        let didStartSession = sessionStarted
 
         assetWriter = nil
         videoInput = nil
@@ -291,6 +295,16 @@ class RecordHandler: NSObject {
         timeline.reset()
         lock.unlock()
 
+        // Without an appended video sample the writer never started a
+        // session, so finishWriting cannot produce a file. A writer that has
+        // already failed cannot finalize either.
+        guard didStartSession, writer.status == .writing else {
+            writer.cancelWriting()
+            RecordHandler.removeFile(atPath: path)
+            completion(nil)
+            return
+        }
+
         vInput?.markAsFinished()
         aInput?.markAsFinished()
 
@@ -298,9 +312,16 @@ class RecordHandler: NSObject {
             if writer.status == .completed {
                 completion(path)
             } else {
+                RecordHandler.removeFile(atPath: path)
                 completion(nil)
             }
         }
+    }
+
+    /// Best-effort removal of an unfinalized recording file.
+    private static func removeFile(atPath path: String?) {
+        guard let path else { return }
+        try? FileManager.default.removeItem(atPath: path)
     }
 
     /// Generates a unique temporary file path for a video recording.

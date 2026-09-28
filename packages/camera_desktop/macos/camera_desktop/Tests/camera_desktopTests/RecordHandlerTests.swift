@@ -134,6 +134,58 @@ final class RecordHandlerTests: XCTestCase {
         XCTAssertLessThan(duration, 0.5)
     }
 
+    func testStopWithoutVideoSampleFailsAndDeletesTemporaryFile() throws {
+        let profile = RecordingQuality.Profile(
+            width: 640,
+            height: 480,
+            framesPerSecond: 30
+        )
+        try XCTSkipUnless(
+            RecordingQuality.supportsEncoding(profile: profile),
+            "This Mac has no H.264 encoder for the fallback recording profile."
+        )
+
+        let now = time(10)
+        let handler = RecordHandler(
+            timeline: RecordingTimeline(clock: { now })
+        )
+        let outputPath = try handler.startRecording(
+            width: Int(profile.width),
+            height: Int(profile.height),
+            targetFps: profile.framesPerSecond,
+            targetBitrate: 1_000_000,
+            audioBitrate: 128_000,
+            enableAudio: true
+        )
+        defer { try? FileManager.default.removeItem(atPath: outputPath) }
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: outputPath),
+            "AVAssetWriter should create the temporary file when writing starts."
+        )
+
+        // Audio alone never starts the writer session.
+        XCTAssertFalse(
+            handler.appendAudioBuffer(
+                try audioSample(presentation: 10, duration: 0.1)
+            )
+        )
+
+        let stopped = expectation(description: "An empty recording stops")
+        var finalizedPath: String? = outputPath
+        handler.stopRecording { path in
+            finalizedPath = path
+            stopped.fulfill()
+        }
+        wait(for: [stopped], timeout: 10)
+
+        XCTAssertNil(finalizedPath)
+        XCTAssertFalse(handler.isRecording)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: outputPath),
+            "A recording that could not be finalized must not leave its temporary file behind."
+        )
+    }
+
     private func videoSample(
         presentation: Double,
         width: Int,
