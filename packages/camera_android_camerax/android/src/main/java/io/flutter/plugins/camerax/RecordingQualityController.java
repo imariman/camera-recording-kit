@@ -193,17 +193,20 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
       @NonNull Camera camera) {
     Long cameraId = null;
     VideoCapture<?> videoCapture = null;
+    boolean bindsPreview = false;
     for (UseCase useCase : useCases) {
       if (useCase instanceof Preview) {
+        bindsPreview = true;
         cameraId = previewIds.get((Preview) useCase);
       } else if (useCase instanceof VideoCapture<?>) {
         videoCapture = (VideoCapture<?>) useCase;
       }
     }
-    if (cameraId == null && videoCapture != null) {
+    if (!bindsPreview && videoCapture != null) {
       // No Preview in this bind (for example setDescription while the preview
       // is paused): fall back to the camera the VideoCapture was last bound
-      // with alongside a Preview.
+      // with alongside a Preview. A bind whose Preview is unknown to
+      // previewIds is not a paused-preview bind and keeps the early return.
       cameraId = videoCaptureIds.get(videoCapture);
     }
     if (cameraId == null) {

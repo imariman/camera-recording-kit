@@ -253,6 +253,30 @@ public class RecordingQualityControllerTest {
     verify(result).error(eq("cameraNotBound"), anyString(), isNull());
   }
 
+  @Test
+  public void registerBoundCamera_ignoresBindWithUnregisteredPreviewEvenIfVideoCaptureIsKnown() {
+    final VideoCapture<Recorder> videoCapture = mockVideoCapture();
+    final Preview registeredPreview = mock(Preview.class);
+    controller.registerPreview(registeredPreview, CAMERA_ID);
+    controller.registerVideoCapture(videoCapture, controller.createConvergenceTracker());
+    controller.registerBoundCamera(
+        mock(CameraSelector.class),
+        Arrays.<UseCase>asList(registeredPreview, videoCapture),
+        mockCamera());
+    controller.clearBoundCameras();
+
+    // The VideoCapture is paired with CAMERA_ID, but this bind carries a Preview that was never
+    // registered, so it must not be stored under the old id.
+    controller.registerBoundCamera(
+        mock(CameraSelector.class),
+        Arrays.<UseCase>asList(mock(Preview.class), videoCapture),
+        mockCamera());
+
+    final MethodChannel.Result result = mock(MethodChannel.Result.class);
+    controller.onMethodCall(cameraIdCall("recordingQualityApplied"), result);
+    verify(result).error(eq("cameraNotBound"), anyString(), isNull());
+  }
+
   /**
    * Mirrors {@code setDescriptionWhileRecording} with a paused preview: the initial bind carries
    * Preview and VideoCapture, {@code unbindAll} clears every registration, the camera switch binds
