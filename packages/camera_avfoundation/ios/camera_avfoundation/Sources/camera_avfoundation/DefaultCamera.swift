@@ -127,6 +127,14 @@ final class DefaultCamera: NSObject, Camera {
   private var exposureMode = PlatformExposureMode.auto
   private var focusMode = PlatformFocusMode.auto
   private var flashMode: PlatformFlashMode
+  /// When a focus/exposure point or mode change last restarted metering.
+  /// AVFoundation raises `isAdjustingFocus`/`isAdjustingExposure` asynchronously
+  /// after such a change, so an idle reading right after it is not convergence.
+  /// Accessed only on `captureSessionQueue`.
+  private var lastMeteringChange: DispatchTime?
+  /// How long an idle reading must follow a metering change before it is trusted,
+  /// unless the device was already seen adjusting after that change.
+  private static let meteringSettleWindow = DispatchTimeInterval.milliseconds(150)
 
   private static func pigeonErrorFromNSError(_ error: NSError) -> PigeonError {
     return PigeonError(
@@ -942,6 +950,7 @@ final class DefaultCamera: NSObject, Camera {
       assertionFailure("Unknown exposure mode")
     }
     captureDevice.unlockForConfiguration()
+    lastMeteringChange = DispatchTime.now()
   }
 
   func setExposureOffset(_ offset: Double) {
@@ -1009,6 +1018,7 @@ final class DefaultCamera: NSObject, Camera {
 
   private func applyFocusMode() {
     applyFocusMode(focusMode, onDevice: captureDevice)
+    lastMeteringChange = DispatchTime.now()
   }
 
   private func applyFocusMode(
@@ -1152,6 +1162,7 @@ final class DefaultCamera: NSObject, Camera {
 
   private func waitForFocusAndExposure(
     deadline: DispatchTime,
+    adjustmentObservedAt: DispatchTime? = nil,
     completion: @escaping (Bool) -> Void
   ) {
     guard captureDevice.isFocusModeSupported(.locked),
@@ -1161,19 +1172,32 @@ final class DefaultCamera: NSObject, Camera {
       return
     }
 
-    if !captureDevice.isAdjustingFocus && !captureDevice.isAdjustingExposure {
-      completion(DispatchTime.now() < deadline)
+    let now = DispatchTime.now()
+    let isAdjusting = captureDevice.isAdjustingFocus || captureDevice.isAdjustingExposure
+    if !isAdjusting && hasMeteringSettled(now: now, adjustmentObservedAt: adjustmentObservedAt) {
+      completion(now < deadline)
       return
     }
 
-    guard DispatchTime.now() < deadline else {
+    guard now < deadline else {
       completion(false)
       return
     }
 
+    let observedAt = isAdjusting ? now : adjustmentObservedAt
     captureSessionQueue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
-      self?.waitForFocusAndExposure(deadline: deadline, completion: completion)
+      self?.waitForFocusAndExposure(
+        deadline: deadline, adjustmentObservedAt: observedAt, completion: completion)
     }
+  }
+
+  /// Whether an idle focus/exposure reading means convergence: no metering change
+  /// is pending, the device was seen adjusting after the latest change, or the
+  /// settle window has passed without AVFoundation starting an adjustment.
+  private func hasMeteringSettled(now: DispatchTime, adjustmentObservedAt: DispatchTime?) -> Bool {
+    guard let lastChange = lastMeteringChange else { return true }
+    if let observed = adjustmentObservedAt, observed >= lastChange { return true }
+    return now >= lastChange + Self.meteringSettleWindow
   }
 
   func setFlashMode(

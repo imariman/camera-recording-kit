@@ -188,6 +188,15 @@ class CameraSession: NSObject {
     /// Pending initialization result callback, called when the first frame arrives.
     private var pendingInitResult: FlutterResult?
 
+    /// When a focus/exposure point or mode change last restarted metering.
+    /// AVFoundation raises `isAdjustingFocus`/`isAdjustingExposure`
+    /// asynchronously after such a change, so an idle reading right after it
+    /// is not convergence. Accessed only on `sessionQueue`.
+    private var lastMeteringChange: DispatchTime?
+    /// How long an idle reading must follow a metering change before it is
+    /// trusted, unless the device was already seen adjusting after that change.
+    private static let meteringSettleWindow = DispatchTimeInterval.milliseconds(150)
+
     struct CameraConfig {
         let deviceId: String
         let resolutionPreset: Int
@@ -788,6 +797,7 @@ class CameraSession: NSObject {
                 try device.lockForConfiguration()
                 device.exposureMode = requestedMode
                 device.unlockForConfiguration()
+                self.lastMeteringChange = DispatchTime.now()
                 DispatchQueue.main.async { result(nil) }
             } catch {
                 self.replyControlError("Could not set exposure mode: \(error.localizedDescription)", result: result)
@@ -821,6 +831,7 @@ class CameraSession: NSObject {
                     device.exposureMode = .autoExpose
                 }
                 device.unlockForConfiguration()
+                self.lastMeteringChange = DispatchTime.now()
                 DispatchQueue.main.async { result(nil) }
             } catch {
                 self.replyControlError("Could not set exposure point: \(error.localizedDescription)", result: result)
@@ -859,6 +870,7 @@ class CameraSession: NSObject {
                 try device.lockForConfiguration()
                 device.focusMode = requestedMode
                 device.unlockForConfiguration()
+                self.lastMeteringChange = DispatchTime.now()
                 DispatchQueue.main.async { result(nil) }
             } catch {
                 self.replyControlError("Could not set focus mode: \(error.localizedDescription)", result: result)
@@ -891,6 +903,7 @@ class CameraSession: NSObject {
                     device.focusMode = .autoFocus
                 }
                 device.unlockForConfiguration()
+                self.lastMeteringChange = DispatchTime.now()
                 DispatchQueue.main.async { result(nil) }
             } catch {
                 self.replyControlError("Could not set focus point: \(error.localizedDescription)", result: result)
@@ -968,27 +981,46 @@ class CameraSession: NSObject {
     private func waitForFocusAndExposure(
         device: AVCaptureDevice,
         deadline: DispatchTime,
+        adjustmentObservedAt: DispatchTime? = nil,
         result: @escaping FlutterResult
     ) {
         guard videoDevice === device else {
             DispatchQueue.main.async { result(false) }
             return
         }
-        if !device.isAdjustingFocus && !device.isAdjustingExposure {
-            DispatchQueue.main.async { result(DispatchTime.now() < deadline) }
+        let now = DispatchTime.now()
+        let isAdjusting = device.isAdjustingFocus || device.isAdjustingExposure
+        if !isAdjusting && hasMeteringSettled(now: now, adjustmentObservedAt: adjustmentObservedAt) {
+            DispatchQueue.main.async { result(now < deadline) }
             return
         }
-        guard DispatchTime.now() < deadline else {
+        guard now < deadline else {
             DispatchQueue.main.async { result(false) }
             return
         }
+        let observedAt = isAdjusting ? now : adjustmentObservedAt
         sessionQueue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
             guard let self = self else {
                 DispatchQueue.main.async { result(false) }
                 return
             }
-            self.waitForFocusAndExposure(device: device, deadline: deadline, result: result)
+            self.waitForFocusAndExposure(
+                device: device,
+                deadline: deadline,
+                adjustmentObservedAt: observedAt,
+                result: result
+            )
         }
+    }
+
+    /// Whether an idle focus/exposure reading means convergence: no metering
+    /// change is pending, the device was seen adjusting after the latest
+    /// change, or the settle window has passed without AVFoundation starting
+    /// an adjustment.
+    private func hasMeteringSettled(now: DispatchTime, adjustmentObservedAt: DispatchTime?) -> Bool {
+        guard let lastChange = lastMeteringChange else { return true }
+        if let observed = adjustmentObservedAt, observed >= lastChange { return true }
+        return now >= lastChange + Self.meteringSettleWindow
     }
 
     private static func isValid(point: CGPoint) -> Bool {
