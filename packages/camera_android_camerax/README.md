@@ -26,10 +26,14 @@ Android recording backend directly:
   camera frame-rate range, per-size sensor duration, CameraX encoder profiles,
   and installed encoder size/rate constraints. It also reports native
   focus-lock and exposure-lock support for that camera name.
-* `recordingQualityApplied(cameraId)` reads the resolution and encoder frame
-  rate from the bound `VideoCapture`/`Recorder`, together with the currently
-  applied stabilization setting. If CameraX did not apply a recording profile,
-  it throws a `PlatformException` with code `unsupportedRecordingProfile`.
+* `recordingQualityApplied(cameraId)` reads the resolution from the bound
+  `VideoCapture`, and the frame rate and stabilization state from the latest
+  Camera2 `CaptureResult` (`CONTROL_AE_TARGET_FPS_RANGE` and
+  `CONTROL_VIDEO_STABILIZATION_MODE`), so it reports what the camera applied
+  rather than what was requested. It waits up to two seconds for capture
+  results to reflect the request. If CameraX did not apply a recording profile,
+  or the camera does not report a fixed frame rate, it throws a
+  `PlatformException` with code `unsupportedRecordingProfile`.
 * `waitForRecordingFocus(cameraId)` observes the active metering target for up
   to two seconds and succeeds only when both AF and AE capture-result states
   converge. It does not submit a new metering request or lock focus; callers

@@ -211,6 +211,8 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
       convergenceTracker = null;
     }
     if (convergenceTracker != null) {
+      // Applied-profile readback must come from capture results of this binding.
+      convergenceTracker.resetCaptureResultReadback();
       cameraControlTrackers.put(camera.getCameraControl(), convergenceTracker);
     }
     boundCameras.put(
@@ -497,7 +499,8 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
       return;
     }
     final VideoCapture<?> videoCapture = boundCamera.videoCapture;
-    if (videoCapture == null) {
+    final RecordingConvergenceTracker captureResults = boundCamera.convergenceTracker;
+    if (videoCapture == null || captureResults == null) {
       result.error(
           "unsupportedRecordingProfile",
           "CameraX did not apply the requested recording profile.",
@@ -505,22 +508,42 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
       return;
     }
 
+    final boolean beforeDeadline = SystemClock.elapsedRealtime() < deadlineMillis;
     final ResolutionInfo resolutionInfo = videoCapture.getResolutionInfo();
-    final Object output = videoCapture.getOutput();
-    final int encoderFrameRate =
-        output instanceof Recorder ? ((Recorder) output).getVideoEncodingFrameRate() : 0;
-    if (resolutionInfo == null || encoderFrameRate <= 0) {
-      if (SystemClock.elapsedRealtime() < deadlineMillis) {
-        getMainHandler()
-            .postDelayed(
-                () -> waitForAppliedProfile(cameraId, result, deadlineMillis),
-                APPLIED_PROFILE_POLL_MILLIS);
+    // Native readback: the capture cadence and stabilization mode the camera
+    // HAL reported in its latest TotalCaptureResult, not the values requested.
+    final Range<Integer> observedFpsRange = captureResults.getObservedAeTargetFpsRange();
+    final Integer observedStabilizationMode = captureResults.getObservedVideoStabilizationMode();
+    if (resolutionInfo == null
+        || observedFpsRange == null
+        || !observedFpsRange.getLower().equals(observedFpsRange.getUpper())) {
+      if (beforeDeadline) {
+        pollAppliedProfile(cameraId, result, deadlineMillis);
         return;
       }
       result.error(
           "unsupportedRecordingProfile",
-          "CameraX did not finish applying the requested resolution and encoder frame rate.",
+          resolutionInfo == null
+              ? "CameraX did not finish applying the requested resolution."
+              : "The camera did not report a fixed capture frame rate for the recording session.",
           null);
+      return;
+    }
+    final int observedFps = observedFpsRange.getUpper();
+
+    // Sanity checks only: give capture results until the deadline to reflect
+    // the latest request (the encoder's declared frame rate and the requested
+    // stabilization mode). The reported values always come from the capture
+    // result, so a request the HAL silently downgraded is reported as such.
+    final int encoderFrameRate = getEncoderFrameRate(videoCapture);
+    final Integer requestedStabilizationMode = getRequestedStabilizationMode(boundCamera);
+    final boolean fpsMatchesEncoder = encoderFrameRate <= 0 || observedFps == encoderFrameRate;
+    final boolean stabilizationMatchesRequest =
+        requestedStabilizationMode == null
+            || isStabilizationActive(requestedStabilizationMode)
+                == isStabilizationActive(observedStabilizationMode);
+    if (beforeDeadline && (!fpsMatchesEncoder || !stabilizationMatchesRequest)) {
+      pollAppliedProfile(cameraId, result, deadlineMillis);
       return;
     }
 
@@ -528,14 +551,24 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     final Map<String, Object> applied = new HashMap<>();
     applied.put("width", resolution.getWidth());
     applied.put("height", resolution.getHeight());
-    applied.put("fps", encoderFrameRate);
+    applied.put("fps", observedFps);
     // Recorder does not expose the selected encoder codec. Do not infer it
     // from the accepted preference; finalized container inspection is the
     // first authoritative readback point.
     applied.put("codec", null);
     applied.put("codecSource", "unavailableUntilFinalized");
-    applied.put("stabilizationEnabled", isStabilizationEnabled(boundCamera, videoCapture));
+    // A HAL that omits CONTROL_VIDEO_STABILIZATION_MODE has not confirmed
+    // stabilization, so it is reported inactive.
+    applied.put("stabilizationEnabled", isStabilizationActive(observedStabilizationMode));
     result.success(applied);
+  }
+
+  private void pollAppliedProfile(
+      long cameraId, @NonNull MethodChannel.Result result, long deadlineMillis) {
+    getMainHandler()
+        .postDelayed(
+            () -> waitForAppliedProfile(cameraId, result, deadlineMillis),
+            APPLIED_PROFILE_POLL_MILLIS);
   }
 
   @NonNull
@@ -546,16 +579,21 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     return mainHandler;
   }
 
-  private boolean isStabilizationEnabled(
-      @NonNull BoundRecordingCamera boundCamera, @NonNull VideoCapture<?> videoCapture) {
-    final Integer camera2Mode =
-        Camera2CameraControl.from(boundCamera.camera.getCameraControl())
-            .getCaptureRequestOptions()
-            .getCaptureRequestOption(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE);
-    if (camera2Mode != null) {
-      return camera2Mode != CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF;
-    }
-    return videoCapture.isVideoStabilizationEnabled();
+  private static int getEncoderFrameRate(@NonNull VideoCapture<?> videoCapture) {
+    final Object output = videoCapture.getOutput();
+    return output instanceof Recorder ? ((Recorder) output).getVideoEncodingFrameRate() : 0;
+  }
+
+  @Nullable
+  private static Integer getRequestedStabilizationMode(@NonNull BoundRecordingCamera boundCamera) {
+    return Camera2CameraControl.from(boundCamera.camera.getCameraControl())
+        .getCaptureRequestOptions()
+        .getCaptureRequestOption(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE);
+  }
+
+  private static boolean isStabilizationActive(@Nullable Integer stabilizationMode) {
+    return stabilizationMode != null
+        && stabilizationMode != CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF;
   }
 
   private void inspectRecordingMedia(
@@ -678,10 +716,19 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     }
   }
 
+  /**
+   * Session capture callback registered on the recording {@link VideoCapture}.
+   *
+   * <p>Tracks AF/AE convergence for {@code waitForRecordingFocus} and keeps the latest capture
+   * cadence and video stabilization mode the camera HAL reported in a {@link TotalCaptureResult},
+   * which is the native readback used by {@code recordingQualityApplied}.
+   */
   static final class RecordingConvergenceTracker
       extends CameraCaptureSession.CaptureCallback {
     @Nullable private Boolean focusConverged;
     @Nullable private Boolean exposureConverged;
+    @Nullable private Range<Integer> observedAeTargetFpsRange;
+    @Nullable private Integer observedVideoStabilizationMode;
     @NonNull private final List<ConvergenceWaiter> waiters = new ArrayList<>();
 
     @Override
@@ -691,8 +738,18 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
         @NonNull TotalCaptureResult result) {
       final Integer afState = result.get(CaptureResult.CONTROL_AF_STATE);
       final Integer aeState = result.get(CaptureResult.CONTROL_AE_STATE);
+      final Range<Integer> aeTargetFpsRange =
+          result.get(CaptureResult.CONTROL_AE_TARGET_FPS_RANGE);
+      final Integer videoStabilizationMode =
+          result.get(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE);
       final List<ConvergenceWaiter> completedWaiters;
       synchronized (this) {
+        if (aeTargetFpsRange != null) {
+          observedAeTargetFpsRange = aeTargetFpsRange;
+        }
+        if (videoStabilizationMode != null) {
+          observedVideoStabilizationMode = videoStabilizationMode;
+        }
         if (afState != null) {
           focusConverged =
               afState == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED
@@ -718,6 +775,27 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     synchronized void reset() {
       focusConverged = null;
       exposureConverged = null;
+    }
+
+    /**
+     * Forgets capture results from an earlier binding so the next applied-profile readback only
+     * reflects the camera session that is currently configured.
+     */
+    synchronized void resetCaptureResultReadback() {
+      observedAeTargetFpsRange = null;
+      observedVideoStabilizationMode = null;
+    }
+
+    /** Latest {@link CaptureResult#CONTROL_AE_TARGET_FPS_RANGE}, or null before any result. */
+    @Nullable
+    synchronized Range<Integer> getObservedAeTargetFpsRange() {
+      return observedAeTargetFpsRange;
+    }
+
+    /** Latest {@link CaptureResult#CONTROL_VIDEO_STABILIZATION_MODE}, or null if never reported. */
+    @Nullable
+    synchronized Integer getObservedVideoStabilizationMode() {
+      return observedVideoStabilizationMode;
     }
 
     void waitForConvergence(
