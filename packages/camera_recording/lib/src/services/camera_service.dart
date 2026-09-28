@@ -74,7 +74,7 @@ class CameraService {
   CameraDescription? _selectedCamera;
   RecordingProfile _recordingProfile = const RecordingProfile();
   Future<void> _operationTail = Future<void>.value();
-  Future<void>? _disposeFuture;
+  Future<RecordingResult?>? _disposeFuture;
   bool _disposeRequested = false;
   bool _videoStabilizationEnabled = false;
   double _minimumZoomLevel = 1;
@@ -779,20 +779,28 @@ class CameraService {
       } catch (_) {
         /* The valid original remains available for Save/Discard. */
       }
-      if (capture != null) {
-        metadata = (metadata ?? const RecordedMediaMetadata()).copyWith(
-          cameraName: capture.cameraName,
-          lensDirection: capture.lensDirection,
-          configuredWidth: capture.format.width,
-          configuredHeight: capture.format.height,
-          configuredFps: capture.format.fps,
-          fallbackReason: _outputDiffers(metadata, capture.format)
-              ? 'encodedMismatch'
-              : capture.fallbackReason,
-        );
-      }
-      return RecordingResult(file: file, mediaMetadata: metadata);
+      return RecordingResult(
+        file: file,
+        mediaMetadata: _withCaptureContext(metadata, capture),
+      );
     });
+  }
+
+  static RecordedMediaMetadata? _withCaptureContext(
+    RecordedMediaMetadata? metadata,
+    AppliedRecordingProfile? capture,
+  ) {
+    if (capture == null) return metadata;
+    return (metadata ?? const RecordedMediaMetadata()).copyWith(
+      cameraName: capture.cameraName,
+      lensDirection: capture.lensDirection,
+      configuredWidth: capture.format.width,
+      configuredHeight: capture.format.height,
+      configuredFps: capture.format.fps,
+      fallbackReason: _outputDiffers(metadata, capture.format)
+          ? 'encodedMismatch'
+          : capture.fallbackReason,
+    );
   }
 
   static bool _outputDiffers(
@@ -813,26 +821,50 @@ class CameraService {
 
   /// Releases the controller when the app enters background; the service can be
   /// reused later through [initialize].
-  Future<void> release() async {
-    if (_disposeRequested) return;
+  ///
+  /// If a recording is active (or paused) it is stopped and finalized first and
+  /// its file is returned, so the host can offer Save/Discard instead of losing
+  /// it. The result carries the configured capture context but no inspection,
+  /// which keeps release fast while the app is backgrounding. Returns null when
+  /// nothing was recording, and the service never deletes the file. A failed
+  /// stop does not prevent the controller from being released.
+  Future<RecordingResult?> release() async {
+    if (_disposeRequested) return null;
     return _enqueue(_releaseCurrentController);
   }
 
-  Future<void> _releaseCurrentController() async {
+  Future<RecordingResult?> _releaseCurrentController() async {
     final controller = _controller;
     _controller = null;
-    if (controller == null) return;
+    if (controller == null) return null;
+    RecordingResult? interrupted;
     if (controller.value.isRecordingVideo) {
+      final capture = _captureProfile;
       try {
-        await _gateway.stop(controller);
+        final file = await _gateway.stop(controller);
+        interrupted = RecordingResult(
+          file: file,
+          mediaMetadata: _withCaptureContext(null, capture),
+        );
       } catch (_) {
-        // Ignore recording-stop errors during disposal.
+        // A failed stop has no finalized file to hand over; release anyway.
       }
     }
-    await _gateway.dispose(controller);
+    try {
+      await _gateway.dispose(controller);
+    } catch (_) {
+      // The finalized file must still reach the caller when disposal fails.
+      if (interrupted != null) return interrupted;
+      rethrow;
+    }
+    return interrupted;
   }
 
-  Future<void> dispose() {
+  /// Permanently releases the camera. Later calls return the same future.
+  ///
+  /// Like [release], an active recording is finalized and its file returned
+  /// instead of being dropped.
+  Future<RecordingResult?> dispose() {
     _disposeRequested = true;
     return _disposeFuture ??= _enqueue(_releaseCurrentController);
   }

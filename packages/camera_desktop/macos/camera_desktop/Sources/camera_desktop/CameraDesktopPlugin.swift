@@ -479,8 +479,13 @@ public class CameraDesktopPlugin: NSObject, FlutterPlugin, NSApplicationDelegate
         sessionsLock.unlock()
 
         ImageStreamHandleBridge.releaseHandles(forCameraId: cameraId)
-        session?.dispose()
-        result(nil)
+        guard let session = session else {
+            result(nil)
+            return
+        }
+        // Reply only after a recording that was still active has been
+        // finalized, so the file is complete when Dart's dispose() returns.
+        session.dispose { result(nil) }
     }
 
     // MARK: - Helpers

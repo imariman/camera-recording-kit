@@ -1061,7 +1061,12 @@ class CameraSession: NSObject {
     /// the capture queue will not invoke any more callbacks.
     /// Texture unregistration and the cameraClosing event are dispatched to the
     /// main queue as they require UI-thread access.
-    func dispose() {
+    ///
+    /// `completion` runs on the main queue once any recording that was still
+    /// active has been finalized, so a caller that replies to Dart can wait for
+    /// the file to be complete. It runs immediately when nothing was recording,
+    /// and never runs for a repeated call.
+    func dispose(completion: (() -> Void)? = nil) {
         // Idempotency guard, first caller wins.
         flagsLock.lock()
         if _isDisposed { flagsLock.unlock(); return }
@@ -1077,9 +1082,24 @@ class CameraSession: NSObject {
         // Remove notification observers before stopping the session.
         NotificationCenter.default.removeObserver(self)
 
+        // CameraService stops and hands over any recording before disposing, so
+        // this only finalizes one when a host disposes the controller directly
+        // or the app terminates. Keep the valid file and log its path instead
+        // of dropping it silently.
+        let cameraId = self.cameraId
+        if recordHandler.isRecording {
+            recordHandler.stopRecording { path in
+                if let path = path {
+                    NSLog("camera_desktop: camera %ld was disposed while recording; "
+                          + "the finalized file was kept at %@", cameraId, path)
+                }
+                DispatchQueue.main.async { completion?() }
+            }
+        } else {
+            DispatchQueue.main.async { completion?() }
+        }
         // stopRunning() blocks until all in-flight AVCaptureOutput delegate
         // calls have returned, so after this line captureOutput() cannot fire.
-        recordHandler.stopRecording { _ in }
         captureSession?.stopRunning()
         captureQueue.sync {
             self.finishPendingStabilization(error: "Camera was disposed.")
