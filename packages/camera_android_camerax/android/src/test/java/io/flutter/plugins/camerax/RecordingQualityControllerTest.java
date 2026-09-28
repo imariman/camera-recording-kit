@@ -184,6 +184,123 @@ public class RecordingQualityControllerTest {
     verify(result, never()).success(false);
   }
 
+  @Test
+  public void recordingQualityApplied_keepsVideoCaptureAfterCameraSwitchWithPausedPreview() {
+    final VideoCapture<Recorder> videoCapture = mockVideoCapture();
+    final ResolutionInfo resolutionInfo = mock(ResolutionInfo.class);
+    when(resolutionInfo.getResolution()).thenReturn(new Size(1920, 1080));
+    when(videoCapture.getResolutionInfo()).thenReturn(resolutionInfo);
+    final Recorder recorder = mock(Recorder.class);
+    when(recorder.getVideoEncodingFrameRate()).thenReturn(30);
+    when(videoCapture.getOutput()).thenReturn(recorder);
+    final RecordingQualityController.RecordingConvergenceTracker tracker =
+        controller.createConvergenceTracker();
+    final CameraControl switchedCameraControl = mock(CameraControl.class);
+
+    switchCameraWithPausedPreview(
+        videoCapture,
+        tracker,
+        mockCamera(mock(CameraControl.class), mock(CameraInfo.class)),
+        mockCamera(switchedCameraControl, mock(CameraInfo.class)),
+        mockCamera(switchedCameraControl, mock(CameraInfo.class)));
+    deliver(
+        tracker,
+        captureResult(new Range<>(30, 30), CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF));
+
+    final MethodChannel.Result result = mock(MethodChannel.Result.class);
+    controller.onMethodCall(cameraIdCall("recordingQualityApplied"), result);
+
+    mockedCamera2CameraControl.verify(() -> Camera2CameraControl.from(switchedCameraControl));
+    verify(result, never()).error(any(), any(), any());
+    verify(result).success(appliedProfile(30, false));
+  }
+
+  @Test
+  public void waitForRecordingFocus_keepsConvergenceTrackerAfterCameraSwitchWithPausedPreview() {
+    final RecordingQualityController.RecordingConvergenceTracker tracker =
+        mock(RecordingQualityController.RecordingConvergenceTracker.class);
+    final CameraControl switchedCameraControl = mock(CameraControl.class);
+    final CameraInfo switchedCameraInfo = mock(CameraInfo.class);
+    when(switchedCameraInfo.isFocusMeteringSupported(any())).thenReturn(true);
+
+    switchCameraWithPausedPreview(
+        mockVideoCapture(),
+        tracker,
+        mockCamera(mock(CameraControl.class), mock(CameraInfo.class)),
+        mockCamera(switchedCameraControl, switchedCameraInfo),
+        mockCamera(switchedCameraControl, switchedCameraInfo));
+
+    controller.onFocusMeteringStarted(switchedCameraControl);
+    verify(tracker).reset();
+
+    final MethodChannel.Result result = mock(MethodChannel.Result.class);
+    controller.onMethodCall(cameraIdCall("waitForRecordingFocus"), result);
+
+    verify(tracker).waitForConvergence(eq(result), any(), any(), eq(2L));
+    verify(result, never()).success(false);
+  }
+
+  @Test
+  public void registerBoundCamera_ignoresVideoCaptureNeverBoundWithAPreview() {
+    final VideoCapture<Recorder> videoCapture = mockVideoCapture();
+    controller.registerVideoCapture(videoCapture, controller.createConvergenceTracker());
+
+    controller.registerBoundCamera(
+        mock(CameraSelector.class), Collections.singletonList(videoCapture), mockCamera());
+
+    final MethodChannel.Result result = mock(MethodChannel.Result.class);
+    controller.onMethodCall(cameraIdCall("recordingQualityApplied"), result);
+    verify(result).error(eq("cameraNotBound"), anyString(), isNull());
+  }
+
+  @Test
+  public void registerBoundCamera_ignoresBindWithUnregisteredPreviewEvenIfVideoCaptureIsKnown() {
+    final VideoCapture<Recorder> videoCapture = mockVideoCapture();
+    final Preview registeredPreview = mock(Preview.class);
+    controller.registerPreview(registeredPreview, CAMERA_ID);
+    controller.registerVideoCapture(videoCapture, controller.createConvergenceTracker());
+    controller.registerBoundCamera(
+        mock(CameraSelector.class),
+        Arrays.<UseCase>asList(registeredPreview, videoCapture),
+        mockCamera());
+    controller.clearBoundCameras();
+
+    // The VideoCapture is paired with CAMERA_ID, but this bind carries a Preview that was never
+    // registered, so it must not be stored under the old id.
+    controller.registerBoundCamera(
+        mock(CameraSelector.class),
+        Arrays.<UseCase>asList(mock(Preview.class), videoCapture),
+        mockCamera());
+
+    final MethodChannel.Result result = mock(MethodChannel.Result.class);
+    controller.onMethodCall(cameraIdCall("recordingQualityApplied"), result);
+    verify(result).error(eq("cameraNotBound"), anyString(), isNull());
+  }
+
+  /**
+   * Mirrors {@code setDescriptionWhileRecording} with a paused preview: the initial bind carries
+   * Preview and VideoCapture, {@code unbindAll} clears every registration, the camera switch binds
+   * only the VideoCapture, and {@code resumePreview} later binds only the Preview.
+   */
+  private void switchCameraWithPausedPreview(
+      VideoCapture<?> videoCapture,
+      RecordingQualityController.RecordingConvergenceTracker tracker,
+      Camera initialCamera,
+      Camera switchedCamera,
+      Camera resumedCamera) {
+    final Preview preview = mock(Preview.class);
+    controller.registerPreview(preview, CAMERA_ID);
+    controller.registerVideoCapture(videoCapture, tracker);
+    controller.registerBoundCamera(
+        mock(CameraSelector.class), Arrays.<UseCase>asList(preview, videoCapture), initialCamera);
+
+    controller.clearBoundCameras();
+    controller.registerBoundCamera(
+        mock(CameraSelector.class), Collections.singletonList(videoCapture), switchedCamera);
+    controller.registerBoundCamera(
+        mock(CameraSelector.class), Collections.singletonList(preview), resumedCamera);
+  }
+
   /**
    * Binds Preview and VideoCapture together, then rebinds only the Preview to a new camera the way
    * {@code resumePreview} does after {@code pausePreview}.

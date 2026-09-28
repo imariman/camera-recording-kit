@@ -66,7 +66,11 @@ public class DeviceOrientationManagerApiTest {
   @Test
   public void onDeviceOrientationChanged_shouldSendMessageWhenOrientationIsUpdated() {
     final DeviceOrientationManagerProxyApi mockApi = mock(DeviceOrientationManagerProxyApi.class);
-    when(mockApi.getPigeonRegistrar()).thenReturn(new TestProxyApiRegistrar());
+    // Create the registrar before stubbing: its constructor creates mocks, which would
+    // otherwise interrupt the when(...).thenReturn(...) call and throw
+    // UnfinishedStubbingException.
+    final TestProxyApiRegistrar registrar = new TestProxyApiRegistrar();
+    when(mockApi.getPigeonRegistrar()).thenReturn(registrar);
 
     final PlatformChannel.DeviceOrientation orientation =
         PlatformChannel.DeviceOrientation.PORTRAIT_UP;

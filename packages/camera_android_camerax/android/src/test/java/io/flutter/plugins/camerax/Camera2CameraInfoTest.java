@@ -20,7 +20,6 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.stubbing.Answer;
 import org.robolectric.RobolectricTestRunner;
-import org.robolectric.annotation.Config;
 
 @RunWith(RobolectricTestRunner.class)
 public class Camera2CameraInfoTest {
@@ -54,7 +53,6 @@ public class Camera2CameraInfoTest {
     assertEquals(value, api.getCameraId(instance));
   }
 
-  @Config(minSdk = 28)
   @SuppressWarnings("unchecked")
   @Test
   public void getCameraCharacteristic_returnsCorrespondingValueOfKeyWhenKeyNotRecognized() {
@@ -69,7 +67,6 @@ public class Camera2CameraInfoTest {
     assertEquals(value, api.getCameraCharacteristic(instance, key));
   }
 
-  @Config(minSdk = 23)
   @SuppressWarnings("unchecked")
   @Test
   public void getCameraCharacteristic_returnsExpectedCameraHardwareLevelWhenRequested() {
