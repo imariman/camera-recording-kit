@@ -402,10 +402,12 @@ class AndroidCameraCameraX extends CameraPlatform {
       mediaSettings?.resolutionPreset,
     );
 
+    // Always reassign so a range from a previously created camera does not
+    // leak into a camera created without an explicit fps.
     final int? targetFps = mediaSettings?.fps;
-    if (targetFps != null) {
-      _targetFpsRange = CameraIntegerRange(lower: targetFps, upper: targetFps);
-    }
+    _targetFpsRange = targetFps == null
+        ? null
+        : CameraIntegerRange(lower: targetFps, upper: targetFps);
 
     final QualitySelector? presetQualitySelector =
         _getQualitySelectorFromPreset(mediaSettings?.resolutionPreset);

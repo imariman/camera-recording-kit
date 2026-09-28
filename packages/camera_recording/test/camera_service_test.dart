@@ -274,28 +274,31 @@ void main() {
     expect(controller.exposureModes, const [ExposureMode.auto]);
   });
 
-  test('verifies camera service behavior 14', () async {
-    final factory = TestCameraControllerFactory();
-    final service = CameraService(
-      const [frontCamera],
-      capabilities: DefaultCameraPlatformCapabilities.cameraCapable,
-      controllerFactory: factory.create,
-    );
+  test(
+    'applies stabilization enabled before initialization and turns it off on the live controller',
+    () async {
+      final factory = TestCameraControllerFactory();
+      final service = CameraService(
+        const [frontCamera],
+        capabilities: DefaultCameraPlatformCapabilities.cameraCapable,
+        controllerFactory: factory.create,
+      );
 
-    expect(await service.setVideoStabilizationEnabled(true), isTrue);
-    await service.initialize(front: true);
+      expect(await service.setVideoStabilizationEnabled(true), isTrue);
+      await service.initialize(front: true);
 
-    final controller = factory.createdControllers.single;
-    expect(controller.videoStabilizationModes, const [
-      VideoStabilizationMode.level1,
-    ]);
+      final controller = factory.createdControllers.single;
+      expect(controller.videoStabilizationModes, const [
+        VideoStabilizationMode.level1,
+      ]);
 
-    expect(await service.setVideoStabilizationEnabled(false), isTrue);
-    expect(controller.videoStabilizationModes, const [
-      VideoStabilizationMode.level1,
-      VideoStabilizationMode.off,
-    ]);
-  });
+      expect(await service.setVideoStabilizationEnabled(false), isTrue);
+      expect(controller.videoStabilizationModes, const [
+        VideoStabilizationMode.level1,
+        VideoStabilizationMode.off,
+      ]);
+    },
+  );
 }
 
 class TestCameraControllerFactory {

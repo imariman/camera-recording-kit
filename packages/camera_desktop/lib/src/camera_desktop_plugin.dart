@@ -22,11 +22,9 @@ class CameraDesktopPlugin extends CameraPlatform {
   /// Creates a new [CameraDesktopPlugin].
   ///
   /// The [channel] parameter is exposed for testing only.
-  CameraDesktopPlugin({
-    @visibleForTesting MethodChannel? channel,
-    this.mirrorPreview = true,
-  }) : _channel =
-           channel ?? const MethodChannel('plugins.flutter.io/camera_desktop');
+  CameraDesktopPlugin({@visibleForTesting MethodChannel? channel})
+    : _channel =
+          channel ?? const MethodChannel('plugins.flutter.io/camera_desktop');
 
   /// Registers this class as the default [CameraPlatform] implementation.
   static void registerWith() {
@@ -59,11 +57,6 @@ class CameraDesktopPlugin extends CameraPlatform {
       return const <String, bool>{};
     }
   }
-
-  /// Whether to mirror the preview horizontally (like a mirror).
-  /// Defaults to `true`. Set to `false` to show the unmirrored camera image.
-  @Deprecated('Mirroring is now handled at the native capture level.')
-  final bool mirrorPreview;
 
   /// Whether the native → Dart method-call handler has been installed.
   bool _nativeCallHandlerSet = false;

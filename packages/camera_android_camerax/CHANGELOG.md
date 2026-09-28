@@ -4,6 +4,8 @@
   deterministic HEVC selection is unavailable through CameraX Recorder.
 * Updates `ResolutionPreset.max` to prefer higher resolution over capture rate
   for CameraX `ResolutionSelector` use cases on Android.
+* Fixes a camera created without an explicit fps reusing the target fps range
+  of a previously created camera.
 
 ## 0.7.4+2
 
