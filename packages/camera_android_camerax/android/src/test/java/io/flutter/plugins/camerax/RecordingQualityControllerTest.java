@@ -349,6 +349,27 @@ public class RecordingQualityControllerTest {
     assertNull(tracker.getObservedVideoStabilizationMode());
   }
 
+  @Test
+  public void registerBoundCamera_keepsCaptureResultsAcrossPreviewOnlyRebind() {
+    final RecordingQualityController.RecordingConvergenceTracker tracker =
+        bindRecordingCamera(60);
+    deliver(
+        tracker,
+        captureResult(new Range<>(60, 60), CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_ON));
+
+    // resumePreview rebinds only the Preview; the recording session is unchanged.
+    controller.registerBoundCamera(
+        mock(CameraSelector.class), Collections.singletonList(boundPreview), mockCamera());
+
+    assertEquals(new Range<>(60, 60), tracker.getObservedAeTargetFpsRange());
+    assertEquals(
+        Integer.valueOf(CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_ON),
+        tracker.getObservedVideoStabilizationMode());
+    final MethodChannel.Result result = mock(MethodChannel.Result.class);
+    controller.onMethodCall(appliedCall(), result);
+    verify(result).success(appliedProfile(60, true));
+  }
+
   @SuppressWarnings("unchecked")
   private RecordingQualityController.RecordingConvergenceTracker bindRecordingCamera(
       int encoderFrameRate) {

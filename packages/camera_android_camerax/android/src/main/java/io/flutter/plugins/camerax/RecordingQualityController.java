@@ -196,6 +196,10 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     if (cameraId == null) {
       return;
     }
+    // Only a bind that (re)attaches the VideoCapture starts a new recording
+    // session. A Preview-only rebind keeps the existing session, so its capture
+    // results stay valid for the applied-profile readback.
+    final boolean bindsVideoCapture = videoCapture != null;
     final CameraInfo selectedCameraInfo = selectedCameraInfos.get(selector);
     final BoundRecordingCamera previousCamera = boundCameras.get(cameraId);
     final RecordingConvergenceTracker convergenceTracker;
@@ -211,8 +215,10 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
       convergenceTracker = null;
     }
     if (convergenceTracker != null) {
-      // Applied-profile readback must come from capture results of this binding.
-      convergenceTracker.resetCaptureResultReadback();
+      if (bindsVideoCapture) {
+        // Applied-profile readback must come from capture results of this binding.
+        convergenceTracker.resetCaptureResultReadback();
+      }
       cameraControlTrackers.put(camera.getCameraControl(), convergenceTracker);
     }
     boundCameras.put(
