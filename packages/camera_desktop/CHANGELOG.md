@@ -2,6 +2,8 @@
 
 * Adds macOS encoder-validated H.264/HEVC capability metadata and one-shot
   codec selection for the next camera configuration.
+* Removes the deprecated, unused `mirrorPreview` constructor parameter from
+  `CameraDesktopPlugin`. Mirroring is controlled through `setMirror`.
 * Fix Linux preview `Internal data stream error` (`not-negotiated`) on cameras that do not expose MJPEG, such as NV12/YUYV-only USB webcams. The MJPEG fast-path added in 1.1.7 was selected whenever its pipeline merely *parsed*, but `gst_parse_launch` succeeds even when the camera cannot produce MJPEG, so the intended raw-capture fallback never ran and initialization failed at `PLAYING`. The plugin now probes the V4L2 device (both `MJPEG` and `JPEG` pixel formats) for the target resolution before choosing the MJPEG path, and otherwise uses the always-safe raw capture path. The MJPEG pipeline pins only the resolution and lets the camera's native frame rate float, with `videorate` adapting it to the requested fps, so requesting a frame rate the camera does not expose natively in MJPEG no longer breaks negotiation.
 
 ## 1.2.0

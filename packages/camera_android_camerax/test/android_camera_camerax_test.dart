@@ -1712,6 +1712,107 @@ void main() {
   );
 
   test(
+    'createCameraWithSettings without fps does not reuse the fps range of a previously created camera',
+    () async {
+      final camera = AndroidCameraCameraX();
+      const testCameraDescription = CameraDescription(
+        name: 'cameraName',
+        lensDirection: CameraLensDirection.back,
+        sensorOrientation: 90,
+      );
+      const fastTargetFps = 60;
+      const testCameraId = 12;
+      final mockCamera = MockCamera();
+
+      // Mock/Detached objects for (typically attached) objects created by
+      // createCamera.
+      final mockProcessCameraProvider = MockProcessCameraProvider();
+      final mockCameraInfo = MockCameraInfo();
+
+      when(
+        mockProcessCameraProvider.bindToLifecycle(any, any),
+      ).thenAnswer((_) async => mockCamera);
+      when(mockCamera.getCameraInfo()).thenAnswer((_) async => mockCameraInfo);
+      when(
+        mockCameraInfo.getCameraState(),
+      ).thenAnswer((_) async => MockLiveCameraState());
+      camera.processCameraProvider = mockProcessCameraProvider;
+      PigeonOverrides.cameraIntegerRange_new =
+          CameraIntegerRange.pigeon_detached;
+
+      final previewFpsRanges = <CameraIntegerRange?>[];
+      final videoCaptureFpsRanges = <CameraIntegerRange?>[];
+      final imageAnalysisFpsRanges = <CameraIntegerRange?>[];
+
+      setUpOverridesForTestingUseCaseConfiguration(
+        mockProcessCameraProvider,
+        newPreview:
+            ({
+              ResolutionSelector? resolutionSelector,
+              CameraIntegerRange? targetFpsRange,
+              int? targetRotation,
+            }) {
+              previewFpsRanges.add(targetFpsRange);
+              final mockPreview = MockPreview();
+              final testResolutionInfo = ResolutionInfo.pigeon_detached(
+                resolution: MockCameraSize(),
+              );
+              when(
+                mockPreview.getResolutionInfo(),
+              ).thenAnswer((_) async => testResolutionInfo);
+              return mockPreview;
+            },
+        withOutputVideoCapture:
+            ({
+              CameraIntegerRange? targetFpsRange,
+              required VideoOutput videoOutput,
+            }) {
+              videoCaptureFpsRanges.add(targetFpsRange);
+              return MockVideoCapture();
+            },
+        newImageAnalysis:
+            ({
+              int? outputImageFormat,
+              ResolutionSelector? resolutionSelector,
+              CameraIntegerRange? targetFpsRange,
+              int? targetRotation,
+            }) {
+              imageAnalysisFpsRanges.add(targetFpsRange);
+              return MockImageAnalysis();
+            },
+      );
+
+      // First camera requests an explicit fps.
+      await camera.createCameraWithSettings(
+        testCameraDescription,
+        const MediaSettings(fps: fastTargetFps),
+      );
+
+      // Second camera is created without an fps.
+      await camera.createCameraWithSettings(
+        testCameraDescription,
+        const MediaSettings(),
+      );
+      await camera.initializeCamera(testCameraId);
+
+      expect(previewFpsRanges, hasLength(2));
+      expect(videoCaptureFpsRanges, hasLength(2));
+      expect(imageAnalysisFpsRanges, hasLength(1));
+
+      // Sanity check: the first camera received the requested range.
+      expect(previewFpsRanges.first?.lower, fastTargetFps);
+      expect(previewFpsRanges.first?.upper, fastTargetFps);
+      expect(videoCaptureFpsRanges.first?.lower, fastTargetFps);
+      expect(videoCaptureFpsRanges.first?.upper, fastTargetFps);
+
+      // The second camera must not inherit the stale range.
+      expect(previewFpsRanges.last, isNull);
+      expect(videoCaptureFpsRanges.last, isNull);
+      expect(imageAnalysisFpsRanges.single, isNull);
+    },
+  );
+
+  test(
     'createCamera properly selects specific back camera by specifying a CameraInfo',
     () async {
       // Arrange
