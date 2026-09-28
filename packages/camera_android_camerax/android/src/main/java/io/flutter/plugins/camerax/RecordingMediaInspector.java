@@ -78,14 +78,14 @@ final class RecordingMediaInspector {
 
       Integer bitrate = null;
       String bitrateSource = "estimated";
-      if (durationMilliseconds != null && durationMilliseconds > 0 && file.length() > 0) {
+      final Integer measuredBitrate =
+          extractInteger(retriever, MediaMetadataRetriever.METADATA_KEY_BITRATE);
+      if (measuredBitrate != null && measuredBitrate > 0) {
+        bitrate = measuredBitrate;
+        bitrateSource = "measured";
+      } else if (durationMilliseconds != null && durationMilliseconds > 0 && file.length() > 0) {
         final long estimatedBitrate = file.length() * 8_000L / durationMilliseconds;
         bitrate = estimatedBitrate > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) estimatedBitrate;
-      } else {
-        bitrate = extractInteger(retriever, MediaMetadataRetriever.METADATA_KEY_BITRATE);
-        if (bitrate != null) {
-          bitrateSource = "measured";
-        }
       }
 
       final Map<String, Object> metadata = new HashMap<>();
