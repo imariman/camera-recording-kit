@@ -28,6 +28,13 @@ timed-out inspection data must not invalidate a successfully finalized file.
 It reads media metadata and does not rewrite the recording. Known AVC and HEVC
 container identifiers are normalized to `h264` and `hevc` in shared metadata.
 
+Releasing or disposing `CameraService` during a recording (for example when the
+app enters background) finalizes the recording instead of dropping it. The file
+is emitted on `CameraService.onRecordingInterrupted` with the configured capture
+context but without inspection, so the host can offer Save/Discard; the service
+never deletes it. If a macOS session is disposed directly while recording, the
+backend keeps the finalized file and logs its path rather than dropping it.
+
 Focus and exposure default to continuous automatic behavior. A lock is applied
 only after convergence and only if both focus and exposure accept it; otherwise
 both remain automatic. Stabilization is opt-in and reported active only after

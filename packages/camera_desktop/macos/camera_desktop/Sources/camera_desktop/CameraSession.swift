@@ -1046,9 +1046,18 @@ class CameraSession: NSObject {
         // Remove notification observers before stopping the session.
         NotificationCenter.default.removeObserver(self)
 
+        // CameraService stops and hands over any recording before disposing, so
+        // this only finalizes one when a host disposes the controller directly
+        // or the app terminates. Keep the valid file and log its path instead
+        // of dropping it silently.
+        let cameraId = self.cameraId
+        recordHandler.stopRecording { path in
+            guard let path = path else { return }
+            NSLog("camera_desktop: camera %ld was disposed while recording; "
+                  + "the finalized file was kept at %@", cameraId, path)
+        }
         // stopRunning() blocks until all in-flight AVCaptureOutput delegate
         // calls have returned, so after this line captureOutput() cannot fire.
-        recordHandler.stopRecording { _ in }
         captureSession?.stopRunning()
         captureQueue.sync {
             self.finishPendingStabilization(error: "Camera was disposed.")
