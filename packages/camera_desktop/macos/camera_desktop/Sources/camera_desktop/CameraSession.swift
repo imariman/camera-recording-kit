@@ -594,10 +594,9 @@ class CameraSession: NSObject {
                 return
             }
             self.captureQueue.async {
-                if let stabilizer = self.videoStabilizer {
-                    stabilizer.configure(width: self.configuredWidth, height: self.configuredHeight,
-                                         framesPerSecond: self.config.targetFps)
-                }
+                // The capture profile is unchanged across a pause, so keep the
+                // stabilizer's buffer pools and only drop stale motion state.
+                self.videoStabilizer?.resetMotion()
                 _ = self.recordHandler.resume()
                 DispatchQueue.main.async { result(nil) }
             }

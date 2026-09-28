@@ -185,6 +185,69 @@ final class MacOSVideoStabilizerTests: XCTestCase {
         XCTAssertEqual(stabilizer.sensorPoint(fromOutputNormalized: .zero), .zero)
     }
 
+    func testResetMotionClearsMotionStateButKeepsConfiguredPools() throws {
+        let width = 320
+        let height = 240
+        let stabilizer = MacOSVideoStabilizer()
+        XCTAssertEqual(
+            stabilizer.configure(width: width, height: height, framesPerSecond: 30),
+            .available
+        )
+        let outputPool = try XCTUnwrap(stabilizer.outputPool)
+        let analysisPool = try XCTUnwrap(stabilizer.analysisPool)
+        let center = CGPoint(x: 0.5, y: 0.5)
+
+        let translations = [
+            CGPoint(x: 0, y: 0), CGPoint(x: 0, y: 0),
+            CGPoint(x: 3, y: 2), CGPoint(x: 3, y: 2),
+        ]
+        for (index, translation) in translations.enumerated() {
+            let sample = try makeTexturedSampleBuffer(
+                width: width,
+                height: height,
+                translation: translation,
+                presentationTimeStamp: CMTime(value: Int64(index * 20), timescale: 600)
+            )
+            XCTAssertTrue(stabilizer.process(sampleBuffer: sample).isStabilized)
+        }
+        let correctedCenter = stabilizer.sensorPoint(fromOutputNormalized: center)
+        XCTAssertGreaterThan(
+            abs(correctedCenter.x - center.x) + abs(correctedCenter.y - center.y),
+            0.001,
+            "The translated sequence should accumulate a non-zero correction."
+        )
+
+        stabilizer.resetMotion()
+
+        XCTAssertTrue(stabilizer.outputPool === outputPool, "resetMotion must not reallocate the output pool.")
+        XCTAssertTrue(stabilizer.analysisPool === analysisPool, "resetMotion must not reallocate the analysis pool.")
+        XCTAssertNil(stabilizer.lastFrameFallbackReason)
+        XCTAssertEqual(
+            stabilizer.sensorPoint(fromOutputNormalized: .zero),
+            .zero,
+            "No cropped frame has been rendered since the reset."
+        )
+
+        // A different translation than the last pre-reset frame: registering
+        // against a stale reference frame would produce a new correction.
+        let resumedSample = try makeTexturedSampleBuffer(
+            width: width,
+            height: height,
+            translation: CGPoint(x: -3, y: -2),
+            presentationTimeStamp: CMTime(value: 200, timescale: 600)
+        )
+        let resumed = stabilizer.process(sampleBuffer: resumedSample)
+        XCTAssertTrue(resumed.isStabilized, "The configured profile must survive resetMotion.")
+        XCTAssertNil(resumed.fallbackReason)
+        XCTAssertEqual(CVPixelBufferGetWidth(try XCTUnwrap(CMSampleBufferGetImageBuffer(resumed.sampleBuffer))), width)
+        XCTAssertEqual(CVPixelBufferGetHeight(try XCTUnwrap(CMSampleBufferGetImageBuffer(resumed.sampleBuffer))), height)
+        let resumedCenter = stabilizer.sensorPoint(fromOutputNormalized: center)
+        XCTAssertEqual(resumedCenter.x, center.x, accuracy: 0.0001)
+        XCTAssertEqual(resumedCenter.y, center.y, accuracy: 0.0001)
+        XCTAssertTrue(stabilizer.outputPool === outputPool)
+        XCTAssertTrue(stabilizer.analysisPool === analysisPool)
+    }
+
     private func meanSquaredAdjacentDifference(_ values: [CGFloat]) -> CGFloat {
         let differences = zip(values.dropFirst(), values).map { current, previous in
             let difference = current - previous

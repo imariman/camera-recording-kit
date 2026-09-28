@@ -89,8 +89,8 @@ public final class MacOSVideoStabilizer {
     private var expectedWidth = 0
     private var expectedHeight = 0
     private var expectedFramesPerSecond = 0
-    private var outputPool: CVPixelBufferPool?
-    private var analysisPool: CVPixelBufferPool?
+    private(set) var outputPool: CVPixelBufferPool?
+    private(set) var analysisPool: CVPixelBufferPool?
     private var referenceAnalysisBuffer: CVPixelBuffer?
     private var frameIndex = 0
     private var lastRenderedCorrection = CGPoint.zero
@@ -169,29 +169,34 @@ public final class MacOSVideoStabilizer {
                 reason: "macOS could not allocate the bounded software-stabilization buffers."
             )
         }
+        resetMotion()
+        return availability
+    }
+
+    /// Drops accumulated motion and the Vision reference frame while keeping
+    /// the configured profile and its private buffer pools. Call this when
+    /// capture continues with the same profile after a discontinuity, such as
+    /// resuming a paused recording, so the next frame is not registered
+    /// against stale content.
+    public func resetMotion() {
         referenceAnalysisBuffer = nil
         frameIndex = 0
         lastFrameFallbackReason = nil
         lastRenderedCorrection = .zero
         lastOutputIsCropped = false
         motionFilter.reset()
-        return availability
     }
 
-    /// Drops all accumulated motion and private frame references. Call this
-    /// before changing camera, while pausing capture, and when recording ends.
+    /// Drops all accumulated motion, private frame references and buffer
+    /// pools. Call this before changing camera, while pausing capture, and
+    /// when recording ends.
     public func reset() {
         expectedWidth = 0
         expectedHeight = 0
         expectedFramesPerSecond = 0
         outputPool = nil
         analysisPool = nil
-        referenceAnalysisBuffer = nil
-        frameIndex = 0
-        lastFrameFallbackReason = nil
-        lastRenderedCorrection = .zero
-        lastOutputIsCropped = false
-        motionFilter.reset()
+        resetMotion()
     }
 
     /// Produces an identically timed, identically sized stabilized sample when
