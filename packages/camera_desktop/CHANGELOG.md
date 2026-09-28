@@ -5,6 +5,11 @@
 * Removes the deprecated, unused `mirrorPreview` constructor parameter from
   `CameraDesktopPlugin`. Mirroring is controlled through `setMirror`.
 * Fix Linux preview `Internal data stream error` (`not-negotiated`) on cameras that do not expose MJPEG, such as NV12/YUYV-only USB webcams. The MJPEG fast-path added in 1.1.7 was selected whenever its pipeline merely *parsed*, but `gst_parse_launch` succeeds even when the camera cannot produce MJPEG, so the intended raw-capture fallback never ran and initialization failed at `PLAYING`. The plugin now probes the V4L2 device (both `MJPEG` and `JPEG` pixel formats) for the target resolution before choosing the MJPEG path, and otherwise uses the always-safe raw capture path. The MJPEG pipeline pins only the resolution and lets the camera's native frame rate float, with `videorate` adapting it to the requested fps, so requesting a frame rate the camera does not expose natively in MJPEG no longer breaks negotiation.
+* macOS: requires the focus/exposure metering pass to start (or a 150 ms
+  settle window to pass) before reporting recording focus convergence.
+* macOS: deletes the temporary file of a recording that could not be
+  finalized, and keeps the stabilizer pixel buffer pools on resume.
+* macOS: replies to `dispose` only after an in-flight recording is finalized.
 
 ## 1.2.0
 
