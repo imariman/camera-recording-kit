@@ -4,6 +4,10 @@
   selection for the next camera configuration.
 * Adds `setJpegImageQuality` for controlling JPEG compression quality.
 * Updates minimum supported SDK version to Flutter 3.38/Dart 3.10.
+* Completes `initialize` with a `cameraNotFound` error instead of hanging when
+  no camera exists.
+* Requires the focus/exposure metering pass to start (or a 150 ms settle
+  window to pass) before reporting recording focus convergence.
 
 ## 0.10.1
 

@@ -6,6 +6,15 @@
   for CameraX `ResolutionSelector` use cases on Android.
 * Fixes a camera created without an explicit fps reusing the target fps range
   of a previously created camera.
+* Reports applied recording fps and video stabilization from the camera's
+  `CaptureResult` (AE target fps range and stabilization mode) instead of
+  echoing the requested values.
+* Keeps the `VideoCapture` registration across `pausePreview`/`resumePreview`
+  and across a camera switch while the preview is paused, so
+  `recordingQualityApplied` and `waitForRecordingFocus` keep working.
+* Prefers the container's measured bitrate over the file-size estimate in
+  recorded media metadata.
+* Fixes the JVM unit test suite and runs it in CI.
 
 ## 0.7.4+2
 
