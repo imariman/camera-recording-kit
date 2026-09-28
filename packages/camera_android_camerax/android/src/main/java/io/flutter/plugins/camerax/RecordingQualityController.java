@@ -197,8 +197,19 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
       return;
     }
     final CameraInfo selectedCameraInfo = selectedCameraInfos.get(selector);
-    final RecordingConvergenceTracker convergenceTracker =
-        videoCapture == null ? null : convergenceTrackers.get(videoCapture);
+    final BoundRecordingCamera previousCamera = boundCameras.get(cameraId);
+    final RecordingConvergenceTracker convergenceTracker;
+    if (videoCapture != null) {
+      convergenceTracker = convergenceTrackers.get(videoCapture);
+    } else if (previousCamera != null) {
+      // A Preview-only rebind (for example resumePreview) leaves the
+      // VideoCapture bound alongside it in place, so keep its registration and
+      // only refresh the camera.
+      videoCapture = previousCamera.videoCapture;
+      convergenceTracker = previousCamera.convergenceTracker;
+    } else {
+      convergenceTracker = null;
+    }
     if (convergenceTracker != null) {
       cameraControlTrackers.put(camera.getCameraControl(), convergenceTracker);
     }
