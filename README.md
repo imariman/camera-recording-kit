@@ -67,3 +67,11 @@ package sequentially. On a developer Mac it uses `mobile-slot` when available;
 CI runs the same Flutter commands directly. macOS additionally runs native
 synthetic tests when Xcode is available. Hardware acceptance remains a release
 gate and is not replaced by automation.
+
+The Android JVM (Robolectric/Mockito) unit tests of `camera_android_camerax`
+are not part of `tool/validate.sh` because the package has no Gradle host of
+its own. Run `tool/test_android_jvm.sh` instead; it creates a throwaway Flutter
+host app with a path dependency on the package and runs
+`:camera_android_camerax:testDebugUnitTest` there. It needs JDK 17 or newer
+(`JAVA_HOME`) and the Android SDK. Set `ANDROID_JVM_HOST_DIR` to keep the host
+app between runs. CI runs the same script in the `android-jvm` job.

@@ -81,6 +81,10 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
   private final ScheduledExecutorService focusTimeoutExecutor =
       Executors.newSingleThreadScheduledExecutor();
   @NonNull private final Map<Preview, Long> previewIds = new IdentityHashMap<>();
+  // Camera ids of VideoCapture use cases that were bound together with a Preview.
+  // Lets a later bind that carries only the VideoCapture (setDescription while
+  // the preview is paused) resolve the same camera id.
+  @NonNull private final Map<VideoCapture<?>, Long> videoCaptureIds = new IdentityHashMap<>();
   @NonNull private final Map<CameraSelector, CameraInfo> selectedCameraInfos = new IdentityHashMap<>();
   @NonNull
   private final Map<VideoCapture<?>, RecordingConvergenceTracker> convergenceTrackers =
@@ -113,6 +117,7 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     }
     synchronized (this) {
       previewIds.clear();
+      videoCaptureIds.clear();
       selectedCameraInfos.clear();
       convergenceTrackers.clear();
       cameraControlTrackers.clear();
@@ -129,6 +134,7 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
   synchronized void registerPreview(@NonNull Preview preview, long cameraId) {
     if (boundCameras.isEmpty()) {
       previewIds.clear();
+      videoCaptureIds.clear();
       convergenceTrackers.clear();
       cameraControlTrackers.clear();
     }
@@ -138,6 +144,7 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
   synchronized void unregisterPreview(@NonNull Preview preview) {
     final Long cameraId = previewIds.remove(preview);
     if (cameraId != null) {
+      videoCaptureIds.values().removeAll(Collections.singleton(cameraId));
       final BoundRecordingCamera removedCamera = boundCameras.remove(cameraId);
       if (removedCamera != null) {
         cameraControlTrackers.remove(removedCamera.camera.getCameraControl());
@@ -193,8 +200,17 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
         videoCapture = (VideoCapture<?>) useCase;
       }
     }
+    if (cameraId == null && videoCapture != null) {
+      // No Preview in this bind (for example setDescription while the preview
+      // is paused): fall back to the camera the VideoCapture was last bound
+      // with alongside a Preview.
+      cameraId = videoCaptureIds.get(videoCapture);
+    }
     if (cameraId == null) {
       return;
+    }
+    if (videoCapture != null) {
+      videoCaptureIds.put(videoCapture, cameraId);
     }
     // Only a bind that (re)attaches the VideoCapture starts a new recording
     // session. A Preview-only rebind keeps the existing session, so its capture

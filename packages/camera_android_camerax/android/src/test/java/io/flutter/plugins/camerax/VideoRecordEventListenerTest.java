@@ -28,7 +28,11 @@ public class VideoRecordEventListenerTest {
   @Test
   public void onEvent_makesCallToDartCallback() {
     final VideoRecordEventListenerProxyApi mockApi = mock(VideoRecordEventListenerProxyApi.class);
-    when(mockApi.getPigeonRegistrar()).thenReturn(new TestProxyApiRegistrar());
+    // Create the registrar before stubbing: its constructor creates mocks, which would
+    // otherwise interrupt the when(...).thenReturn(...) call and throw
+    // UnfinishedStubbingException.
+    final TestProxyApiRegistrar registrar = new TestProxyApiRegistrar();
+    when(mockApi.getPigeonRegistrar()).thenReturn(registrar);
 
     final VideoRecordEventListenerProxyApi.VideoRecordEventListenerImpl instance =
         new VideoRecordEventListenerProxyApi.VideoRecordEventListenerImpl(mockApi);

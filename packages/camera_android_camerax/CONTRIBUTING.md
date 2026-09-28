@@ -60,8 +60,18 @@ more information on contributing packages in general, check out our
 
 While none of the generated `pigeon` files are tested, all plugin impelementation and
 wrapped native Android classes (Java & Dart) are tested. You can find the Java tests under
-`android/src/test/java/io/flutter/plugins/camerax/` and the Dart tests under `test/`. To
-run these tests, please see the instructions in the [running plugin tests guide][5].
+`android/src/test/java/io/flutter/plugins/camerax/` and the Dart tests under `test/`.
+
+Run the Dart tests with `flutter test` from this directory. The Java tests need a
+Flutter host app because this package ships no example app or Gradle wrapper and
+its `build.gradle.kts` reads `flutter.compileSdkVersion`; run them with
+`tool/test_android_jvm.sh` from the repository root (JDK 17 or newer). Every Java
+test runs against Robolectric SDK 35, pinned in
+`android/src/test/resources/robolectric.properties`, so the suite works on JDK 17
+(Robolectric SDK 36 requires JDK 21). Keep new Robolectric tests on that pin unless
+they need a newer SDK, in which case document the JDK requirement.
+
+For the upstream approach to running plugin tests, see the [running plugin tests guide][5].
 
 [1]: https://pub.dev/packages/pigeon
 [2]: https://docs.google.com/document/d/1wXB1zNzYhd2SxCu1_BK3qmNWRhonTB6qdv4erdtBQqo/edit?usp=sharing&resourcekey=0-WOBqqOKiO9SARnziBg28pg

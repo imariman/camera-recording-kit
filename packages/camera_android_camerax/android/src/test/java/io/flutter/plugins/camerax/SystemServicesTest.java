@@ -160,7 +160,11 @@ public class SystemServicesTest {
   @Test
   public void onCameraError() {
     final SystemServicesManagerProxyApi mockApi = mock(SystemServicesManagerProxyApi.class);
-    when(mockApi.getPigeonRegistrar()).thenReturn(new TestProxyApiRegistrar());
+    // Create the registrar before stubbing: its constructor creates mocks, which would
+    // otherwise interrupt the when(...).thenReturn(...) call and throw
+    // UnfinishedStubbingException.
+    final TestProxyApiRegistrar registrar = new TestProxyApiRegistrar();
+    when(mockApi.getPigeonRegistrar()).thenReturn(registrar);
 
     final SystemServicesManager instance =
         new SystemServicesManagerProxyApi.SystemServicesManagerImpl(mockApi);

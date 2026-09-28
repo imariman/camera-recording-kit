@@ -16,7 +16,11 @@ public class ObserverTest {
   @Test
   public void onChanged_makesExpectedCallToDartCallback() {
     final ObserverProxyApi mockApi = mock(ObserverProxyApi.class);
-    when(mockApi.getPigeonRegistrar()).thenReturn(new TestProxyApiRegistrar());
+    // Create the registrar before stubbing: its constructor creates mocks, which would
+    // otherwise interrupt the when(...).thenReturn(...) call and throw
+    // UnfinishedStubbingException.
+    final TestProxyApiRegistrar registrar = new TestProxyApiRegistrar();
+    when(mockApi.getPigeonRegistrar()).thenReturn(registrar);
 
     final ObserverProxyApi.ObserverImpl<String> instance =
         new ObserverProxyApi.ObserverImpl<>(mockApi);

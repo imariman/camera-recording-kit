@@ -25,7 +25,11 @@ public class AnalyzerTest {
   @Test
   public void analyze_makesCallToDartAnalyze() {
     final AnalyzerProxyApi mockApi = mock(AnalyzerProxyApi.class);
-    when(mockApi.getPigeonRegistrar()).thenReturn(new TestProxyApiRegistrar());
+    // Create the registrar before stubbing: its constructor creates mocks, which would
+    // otherwise interrupt the when(...).thenReturn(...) call and throw
+    // UnfinishedStubbingException.
+    final TestProxyApiRegistrar registrar = new TestProxyApiRegistrar();
+    when(mockApi.getPigeonRegistrar()).thenReturn(registrar);
 
     final AnalyzerProxyApi.AnalyzerImpl instance = new AnalyzerProxyApi.AnalyzerImpl(mockApi);
     final androidx.camera.core.ImageProxy image = mock(ImageProxy.class);
