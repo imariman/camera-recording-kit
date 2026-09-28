@@ -411,7 +411,15 @@ extension CameraPlugin: CameraApi {
     withImageFormat imageFormat: PlatformImageFormatGroup,
     completion: @escaping (Result<Void, any Error>) -> Void
   ) {
-    guard let camera = camera else { return }
+    guard let camera = camera else {
+      completion(
+        .failure(
+          PigeonError(
+            code: "cameraNotFound",
+            message: "Cannot initialize camera \(cameraId): no camera has been created.",
+            details: nil)))
+      return
+    }
 
     camera.videoFormat = getPixelFormat(for: imageFormat)
 
