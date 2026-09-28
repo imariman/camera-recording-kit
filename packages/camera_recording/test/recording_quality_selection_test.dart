@@ -628,6 +628,7 @@ class QualityFakeGateway extends RecordingGateway {
   Object? initializeError;
   Object? inspectionError;
   Object? stopError;
+  Object? disposeError;
   Completer<void>? _deferredInitialize;
   Completer<void>? _deferredInitializeStarted;
   int starts = 0;
@@ -761,6 +762,13 @@ class QualityFakeGateway extends RecordingGateway {
   Future<void> resume(CameraController controller) async {
     resumes++;
     controller.value = controller.value.copyWith(isRecordingPaused: false);
+  }
+
+  @override
+  Future<void> dispose(CameraController controller) async {
+    await super.dispose(controller);
+    final error = disposeError;
+    if (error != null) throw error;
   }
 
   @override

@@ -35,7 +35,7 @@ void main() {
       );
 
   for (final paused in [false, true]) {
-    test('release() while ${paused ? 'paused' : 'recording'} delivers the '
+    test('release() while ${paused ? 'paused' : 'recording'} returns the '
         'finalized file and keeps the service reusable', () async {
       final gateway = QualityFakeGateway();
       final service = serviceFor(gateway);
@@ -44,11 +44,10 @@ void main() {
       expect(await service.startRecording(), isTrue);
       if (paused) await service.pauseRecording();
       final controller = gateway.factory.createdControllers.last;
-      final interrupted = service.onRecordingInterrupted.first;
 
-      await service.release();
+      final interrupted = await service.release();
 
-      expect(await interrupted, isInterruptedOriginal);
+      expect(interrupted, isInterruptedOriginal);
       expect(gateway.stops, 1);
       expect(controller.wasDisposed, isTrue);
       expect(service.controller, isNull);
@@ -59,62 +58,56 @@ void main() {
     });
   }
 
+  test('dispose() while recording returns the finalized file, and later '
+      'calls return the same result', () async {
+    final gateway = QualityFakeGateway();
+    final service = serviceFor(gateway);
+    await service.initialize(front: true, recordingProfile: request);
+    expect(await service.startRecording(), isTrue);
+    final controller = gateway.factory.createdControllers.last;
+
+    final first = await service.dispose();
+    final second = await service.dispose();
+
+    expect(first, isInterruptedOriginal);
+    expect(second, same(first));
+    expect(gateway.stops, 1);
+    expect(controller.wasDisposed, isTrue);
+  });
+
   test(
-    'dispose() while recording delivers the finalized file, then closes',
+    'a stop rejected by a pending dispose is still returned by dispose()',
     () async {
       final gateway = QualityFakeGateway();
       final service = serviceFor(gateway);
       await service.initialize(front: true, recordingProfile: request);
       expect(await service.startRecording(), isTrue);
-      final controller = gateway.factory.createdControllers.last;
-      final events = expectLater(
-        service.onRecordingInterrupted,
-        emitsInOrder([isInterruptedOriginal, emitsDone]),
-      );
-
-      await service.dispose();
-
-      await events;
-      expect(gateway.stops, 1);
-      expect(controller.wasDisposed, isTrue);
-    },
-  );
-
-  test(
-    'a stop rejected by a pending dispose still surfaces the file',
-    () async {
-      final gateway = QualityFakeGateway();
-      final service = serviceFor(gateway);
-      await service.initialize(front: true, recordingProfile: request);
-      expect(await service.startRecording(), isTrue);
-      final delivered = service.onRecordingInterrupted.toList();
 
       final disposing = service.dispose();
       expect(await service.stopRecording(), isNull);
       expect(await service.finishRecording(), isNull);
-      await disposing;
 
-      expect(await delivered, [isInterruptedOriginal]);
+      expect(await disposing, isInterruptedOriginal);
       expect(gateway.stops, 1);
     },
   );
 
-  test('nothing is emitted when no recording is active', () async {
-    final gateway = QualityFakeGateway();
-    final service = serviceFor(gateway);
-    final delivered = service.onRecordingInterrupted.toList();
+  test(
+    'release() and dispose() return null when no recording is active',
+    () async {
+      final gateway = QualityFakeGateway();
+      final service = serviceFor(gateway);
 
-    await service.initialize(front: true, recordingProfile: request);
-    await service.release();
-    await service.initialize(front: true, recordingProfile: request);
-    expect(await service.startRecording(), isTrue);
-    expect(await service.finishRecording(), isNotNull);
-    await service.release();
-    await service.dispose();
-
-    expect(await delivered, isEmpty);
-    expect(gateway.stops, 1);
-  });
+      await service.initialize(front: true, recordingProfile: request);
+      expect(await service.release(), isNull);
+      await service.initialize(front: true, recordingProfile: request);
+      expect(await service.startRecording(), isTrue);
+      expect(await service.finishRecording(), isNotNull);
+      expect(await service.release(), isNull);
+      expect(await service.dispose(), isNull);
+      expect(gateway.stops, 1);
+    },
+  );
 
   test(
     'a failed stop still releases the controller without throwing',
@@ -122,34 +115,38 @@ void main() {
       final gateway = QualityFakeGateway()
         ..stopError = CameraException('stopFailed', 'Encoder failed');
       final service = serviceFor(gateway);
-      final delivered = service.onRecordingInterrupted.toList();
       await service.initialize(front: true, recordingProfile: request);
       expect(await service.startRecording(), isTrue);
       final controller = gateway.factory.createdControllers.last;
 
-      await service.release();
+      expect(await service.release(), isNull);
 
       expect(controller.wasDisposed, isTrue);
       expect(service.controller, isNull);
-      await service.dispose();
-      expect(await delivered, isEmpty);
+      expect(await service.dispose(), isNull);
     },
   );
 
-  test(
-    'legacy controllers deliver the file without capture metadata',
-    () async {
-      final gateway = QualityFakeGateway()..qualitySelection = false;
-      final service = serviceFor(gateway);
-      await service.initialize(front: true, recordingProfile: request);
-      expect(await service.startRecording(), isTrue);
-      final interrupted = service.onRecordingInterrupted.first;
+  test('a failed dispose does not lose the finalized file', () async {
+    final gateway = QualityFakeGateway()
+      ..disposeError = CameraException('disposeFailed', 'Camera vanished');
+    final service = serviceFor(gateway);
+    await service.initialize(front: true, recordingProfile: request);
+    expect(await service.startRecording(), isTrue);
 
-      await service.dispose();
+    expect(await service.release(), isInterruptedOriginal);
+    expect(service.controller, isNull);
+  });
 
-      final result = await interrupted;
-      expect(result.file.path, '/tmp/quality-original.mp4');
-      expect(result.mediaMetadata, isNull);
-    },
-  );
+  test('legacy controllers return the file without capture metadata', () async {
+    final gateway = QualityFakeGateway()..qualitySelection = false;
+    final service = serviceFor(gateway);
+    await service.initialize(front: true, recordingProfile: request);
+    expect(await service.startRecording(), isTrue);
+
+    final result = await service.dispose();
+
+    expect(result?.file.path, '/tmp/quality-original.mp4');
+    expect(result?.mediaMetadata, isNull);
+  });
 }

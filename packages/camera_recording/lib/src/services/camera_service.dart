@@ -74,10 +74,8 @@ class CameraService {
   CameraDescription? _selectedCamera;
   RecordingProfile _recordingProfile = const RecordingProfile();
   Future<void> _operationTail = Future<void>.value();
-  Future<void>? _disposeFuture;
+  Future<RecordingResult?>? _disposeFuture;
   bool _disposeRequested = false;
-  final StreamController<RecordingResult> _interruptedRecordings =
-      StreamController<RecordingResult>.broadcast();
   bool _videoStabilizationEnabled = false;
   double _minimumZoomLevel = 1;
   double _maximumZoomLevel = 1;
@@ -112,20 +110,6 @@ class CameraService {
   bool get supportsZoom => _maximumZoomLevel > _minimumZoomLevel;
   bool get supportsExposureCompensation =>
       _maximumExposureOffset > _minimumExposureOffset;
-
-  /// Recordings that [release] or [dispose] had to stop because they were
-  /// still active, for example when the app entered background mid-recording.
-  ///
-  /// Each event carries the finalized original file, the same file
-  /// [finishRecording] would have returned, so the host can offer Save/Discard.
-  /// The service never deletes it. Metadata holds only the configured capture
-  /// context (null without a verified quality profile); the file is not
-  /// inspected, which keeps release fast while the app is backgrounding.
-  ///
-  /// This is a broadcast stream and events are not buffered: subscribe before
-  /// calling [release] or [dispose]. The stream closes after [dispose].
-  Stream<RecordingResult> get onRecordingInterrupted =>
-      _interruptedRecordings.stream;
 
   /// Switches front/back cameras on mobile and built-in, external, or Continuity
   /// cameras on desktop. No button is shown on single-camera devices.
@@ -838,53 +822,50 @@ class CameraService {
   /// Releases the controller when the app enters background; the service can be
   /// reused later through [initialize].
   ///
-  /// An active (or paused) recording is stopped and finalized first, and its
-  /// file is delivered through [onRecordingInterrupted] instead of being
-  /// dropped. A failed stop does not prevent the controller from being
-  /// released.
-  Future<void> release() async {
-    if (_disposeRequested) return;
+  /// If a recording is active (or paused) it is stopped and finalized first and
+  /// its file is returned, so the host can offer Save/Discard instead of losing
+  /// it. The result carries the configured capture context but no inspection,
+  /// which keeps release fast while the app is backgrounding. Returns null when
+  /// nothing was recording, and the service never deletes the file. A failed
+  /// stop does not prevent the controller from being released.
+  Future<RecordingResult?> release() async {
+    if (_disposeRequested) return null;
     return _enqueue(_releaseCurrentController);
   }
 
-  Future<void> _releaseCurrentController() async {
+  Future<RecordingResult?> _releaseCurrentController() async {
     final controller = _controller;
     _controller = null;
-    if (controller == null) return;
+    if (controller == null) return null;
+    RecordingResult? interrupted;
     if (controller.value.isRecordingVideo) {
       final capture = _captureProfile;
-      XFile? file;
       try {
-        file = await _gateway.stop(controller);
+        final file = await _gateway.stop(controller);
+        interrupted = RecordingResult(
+          file: file,
+          mediaMetadata: _withCaptureContext(null, capture),
+        );
       } catch (_) {
         // A failed stop has no finalized file to hand over; release anyway.
       }
-      // Deliver before disposing so a dispose failure cannot lose the file.
-      if (file != null && !_interruptedRecordings.isClosed) {
-        _interruptedRecordings.add(
-          RecordingResult(
-            file: file,
-            mediaMetadata: _withCaptureContext(null, capture),
-          ),
-        );
-      }
     }
-    await _gateway.dispose(controller);
+    try {
+      await _gateway.dispose(controller);
+    } catch (_) {
+      // The finalized file must still reach the caller when disposal fails.
+      if (interrupted != null) return interrupted;
+      rethrow;
+    }
+    return interrupted;
   }
 
   /// Permanently releases the camera. Later calls return the same future.
   ///
-  /// Like [release], an active recording is finalized and delivered through
-  /// [onRecordingInterrupted] before that stream closes.
-  Future<void> dispose() {
+  /// Like [release], an active recording is finalized and its file returned
+  /// instead of being dropped.
+  Future<RecordingResult?> dispose() {
     _disposeRequested = true;
-    return _disposeFuture ??= _enqueue(() async {
-      try {
-        await _releaseCurrentController();
-      } finally {
-        // Not awaited: a paused host subscription must not block disposal.
-        unawaited(_interruptedRecordings.close());
-      }
-    });
+    return _disposeFuture ??= _enqueue(_releaseCurrentController);
   }
 }
