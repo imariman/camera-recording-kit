@@ -141,7 +141,11 @@ void main() {
   test('legacy controllers return the file without capture metadata', () async {
     final gateway = QualityFakeGateway()..qualitySelection = false;
     final service = serviceFor(gateway);
-    await service.initialize(front: true, recordingProfile: request);
+    // Legacy backends reject explicit formats, so use the automatic profile.
+    await service.initialize(
+      front: true,
+      recordingProfile: const RecordingProfile(),
+    );
     expect(await service.startRecording(), isTrue);
 
     final result = await service.dispose();

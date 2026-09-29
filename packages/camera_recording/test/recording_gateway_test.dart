@@ -1,3 +1,4 @@
+import 'package:camera/camera.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:camera_recording/camera_recording.dart';
@@ -103,6 +104,71 @@ void main() {
       expect(await gateway.waitForFocus(1), isFalse);
     },
   );
+
+  const camera = CameraDescription(
+    name: 'camera',
+    lensDirection: CameraLensDirection.back,
+    sensorOrientation: 90,
+  );
+
+  for (final platform in platforms) {
+    for (final codec in RecordingVideoCodec.values) {
+      test(
+        '${platform.backend.name} routes ${codec.name} codec selection to its '
+        'own backend before creating the controller',
+        () async {
+          final gateway = RecordingGateway(backend: platform.backend);
+          final calls = <(String, MethodCall)>[];
+          final messenger =
+              TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+          for (final other in platforms) {
+            messenger.setMockMethodCallHandler(MethodChannel(other.channel), (
+              call,
+            ) async {
+              calls.add((other.channel, call));
+              return null;
+            });
+            addTearDown(
+              () => messenger.setMockMethodCallHandler(
+                MethodChannel(other.channel),
+                null,
+              ),
+            );
+          }
+
+          // No camera plugin is registered in unit tests, so controller
+          // initialization fails after the codec has been selected.
+          await expectLater(
+            gateway.createInitializedController(
+              description: camera,
+              preset: ResolutionPreset.veryHigh,
+              enableAudio: false,
+              videoCodec: codec,
+            ),
+            throwsA(anything),
+          );
+
+          expect(calls, hasLength(1));
+          expect(calls.single.$1, platform.channel);
+          expect(calls.single.$2.method, 'setRecordingVideoCodec');
+          expect(calls.single.$2.arguments, {'codec': codec.name});
+        },
+      );
+    }
+  }
+
+  test('unsupported hosts refuse HEVC before creating a controller', () async {
+    const gateway = RecordingGateway(backend: RecordingBackend.unsupported);
+    await expectLater(
+      gateway.createInitializedController(
+        description: camera,
+        preset: ResolutionPreset.max,
+        enableAudio: false,
+        videoCodec: RecordingVideoCodec.hevc,
+      ),
+      throwsA(isA<UnsupportedError>()),
+    );
+  });
 
   test('macOS camera access errors retain their native error code', () async {
     const gateway = RecordingGateway(backend: RecordingBackend.macos);
