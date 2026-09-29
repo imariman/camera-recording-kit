@@ -39,3 +39,15 @@ should finalize the file, emit a `cameraError`, and let `stopVideoRecording`
 return that file; quitting the app while recording should leave a playable
 file; with an external microphone selected as the system input, recordings
 should use it.
+
+## iOS native tests and limits
+
+`tool/test_ios_camera_native.py` compiles `camera_avfoundation` against the
+Flutter iOS engine (`flutter precache --ios`) and runs its XCTests on an iPhone
+simulator, booting one when none is running. They cover device-free logic only:
+exact format selection and the `btp2`/1:1 guard, capability and codec
+filtering with fake formats, the focus/exposure settle rule, point-of-interest
+orientation and stabilization readback. Recording through a background
+transition, `dispose` while recording, HEVC availability on the capture output,
+camera switches while recording and the format lists of real lenses must be
+checked on a physical device.

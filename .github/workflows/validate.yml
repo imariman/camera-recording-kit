@@ -45,3 +45,16 @@ jobs:
       - uses: actions/checkout@v7
       - name: Run native synthetic camera tests
         run: python3 tool/test_macos_camera_native.py
+
+  ios-native-simulator:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.47.2
+      - name: Fetch the iOS engine artifacts
+        run: flutter precache --ios
+      - name: Run camera_avfoundation native tests on an iOS simulator
+        run: python3 tool/test_ios_camera_native.py

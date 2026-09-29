@@ -1,3 +1,7 @@
+// Copyright 2026 Camera Recording Kit contributors
+// Use of this source code is governed by the MIT license that can be
+// found in the LICENSE file at the root of this repository.
+
 import 'dart:async';
 
 import 'package:camera/camera.dart';

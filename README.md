@@ -78,8 +78,12 @@ CI runs the same Flutter commands directly. On macOS, `tool/validate.sh` then
 runs the native synthetic tests (`tool/test_macos_camera_native.py`), which
 require full Xcode selected with `xcode-select`; with only the Command Line
 Tools, or on another OS, it prints a skip line instead. CI runs the native
-tests in a separate macOS job. Hardware acceptance remains a release gate and
-is not replaced by automation.
+tests in a separate macOS job. The device-free iOS XCTests of
+`camera_avfoundation` are not part of `tool/validate.sh` because they boot an
+iOS simulator; run `python3 tool/test_ios_camera_native.py` (full Xcode with an
+iOS simulator runtime and `flutter precache --ios`), which CI does in the
+`ios-native-simulator` job. Hardware acceptance remains a release gate and is
+not replaced by automation.
 
 The Android JVM (Robolectric/Mockito) unit tests of `camera_android_camerax`
 are not part of `tool/validate.sh` because the package has no Gradle host of

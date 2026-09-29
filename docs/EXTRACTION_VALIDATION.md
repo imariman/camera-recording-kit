@@ -60,4 +60,6 @@ Flutter 3.47.2) reported:
 | macOS native synthetic media XCTest suite | 21 passed |
 | Flutter analysis of each package | No issues |
 
-iOS native SDK tests are still not part of CI.
+The device-free iOS XCTests of `camera_avfoundation` added with the #22-#36
+bug-scan fixes run in the `ios-native-simulator` job through
+`tool/test_ios_camera_native.py`.
