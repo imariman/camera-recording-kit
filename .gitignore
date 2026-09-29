@@ -17,3 +17,6 @@ __pycache__/
 .swiftpm/
 .build/
 pubspec_overrides.yaml
+.gradle/
+local.properties
+Package.resolved

@@ -40,8 +40,13 @@ for package in "$root"/packages/*; do
   )
 done
 
-if [[ "$(uname -s)" == "Darwin" ]]; then
+# The native XCTest suite links XCTest from the macOS platform of a full Xcode
+# install; Command Line Tools alone cannot build it.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  printf '\nSkipping macOS native tests on %s.\n' "$(uname -s)"
+elif developer_dir="$(xcode-select -p 2>/dev/null)" &&
+  [[ -d "$developer_dir/Platforms/MacOSX.platform" ]]; then
   run_native_test
 else
-  printf '\nSkipping macOS native tests on %s.\n' "$(uname -s)"
+  printf '\nSkipping macOS native tests: they require full Xcode selected with xcode-select.\n'
 fi
