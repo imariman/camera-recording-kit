@@ -1068,25 +1068,11 @@ class CameraSession: NSObject {
     /// the file to be complete. It runs immediately when nothing was recording,
     /// and never runs for a repeated call.
     func dispose(completion: (() -> Void)? = nil) {
-        // Idempotency guard, first caller wins.
-        flagsLock.lock()
-        if _isDisposed { flagsLock.unlock(); return }
-        _isDisposed = true
-        _imageStreaming = false
-        flagsLock.unlock()
-
-
-        // Null out the FFI callback under lock, guarantees no in-flight
-        // invocation reaches Dart after this returns.
-        imageStreamFFI.unregisterCallback()
-
-        // Remove notification observers before stopping the session.
-        NotificationCenter.default.removeObserver(self)
+        guard beginDispose() else { return }
 
         // CameraService stops and hands over any recording before disposing, so
-        // this only finalizes one when a host disposes the controller directly
-        // or the app terminates. Keep the valid file and log its path instead
-        // of dropping it silently.
+        // this only finalizes one when a host disposes the controller directly.
+        // Keep the valid file and log its path instead of dropping it silently.
         let cameraId = self.cameraId
         if recordHandler.isRecording {
             recordHandler.stopRecording { path in
@@ -1099,6 +1085,48 @@ class CameraSession: NSObject {
         } else {
             DispatchQueue.main.async { completion?() }
         }
+        finishDispose()
+    }
+
+    /// Disposes the session during app termination, blocking the calling
+    /// (main) thread until an active recording is finalized or `deadline`
+    /// passes. The wait never depends on the main queue or run loop, which
+    /// do not turn while `applicationWillTerminate` runs.
+    func disposeForTermination(deadline: DispatchTime) {
+        guard beginDispose() else { return }
+        if let outcome = recordHandler.stopRecordingAndWait(deadline: deadline) {
+            if !outcome.finished {
+                NSLog("camera_desktop: camera %ld is still finalizing a recording at app "
+                      + "termination; the file is recoverable up to its last movie fragment.",
+                      cameraId)
+            } else if let path = outcome.path {
+                NSLog("camera_desktop: camera %ld was recording at app termination; "
+                      + "the finalized file was kept at %@", cameraId, path)
+            }
+        }
+        finishDispose()
+    }
+
+    /// Marks the session disposed. Returns false for a repeated call.
+    private func beginDispose() -> Bool {
+        // Idempotency guard, first caller wins.
+        flagsLock.lock()
+        if _isDisposed { flagsLock.unlock(); return false }
+        _isDisposed = true
+        _imageStreaming = false
+        flagsLock.unlock()
+
+        // Null out the FFI callback under lock, guarantees no in-flight
+        // invocation reaches Dart after this returns.
+        imageStreamFFI.unregisterCallback()
+
+        // Remove notification observers before stopping the session.
+        NotificationCenter.default.removeObserver(self)
+        return true
+    }
+
+    /// Stops capture and releases the session graph.
+    private func finishDispose() {
         // stopRunning() blocks until all in-flight AVCaptureOutput delegate
         // calls have returned, so after this line captureOutput() cannot fire.
         captureSession?.stopRunning()

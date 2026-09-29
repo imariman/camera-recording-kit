@@ -186,6 +186,115 @@ final class RecordHandlerTests: XCTestCase {
         )
     }
 
+    func testTerminationStopFinalizesSynchronouslyOnMainThreadIntoReadableFile() throws {
+        let profile = try fallbackProfile()
+        let handler = RecordHandler(timeline: RecordingTimeline(clock: { self.time(10) }))
+        let outputPath = try handler.startRecording(
+            width: Int(profile.width),
+            height: Int(profile.height),
+            targetFps: profile.framesPerSecond,
+            targetBitrate: 1_000_000,
+            audioBitrate: 128_000,
+            enableAudio: true
+        )
+        defer { try? FileManager.default.removeItem(atPath: outputPath) }
+        XCTAssertEqual(
+            handler.assetWriterForTesting?.movieFragmentInterval,
+            RecordHandler.movieFragmentInterval,
+            "The writer must emit movie fragments so an interrupted file stays recoverable."
+        )
+        for frame in 0..<10 {
+            XCTAssertTrue(appendWhenReady(handler, try videoSample(
+                presentation: 10 + Double(frame) / 30,
+                width: Int(profile.width),
+                height: Int(profile.height)
+            )))
+        }
+        XCTAssertTrue(handler.appendAudioBuffer(try audioSample(presentation: 10, duration: 0.2)))
+
+        // applicationWillTerminate blocks the main thread; the finalize must
+        // complete without the main queue or run loop turning.
+        XCTAssertTrue(Thread.isMainThread)
+        let outcome = try XCTUnwrap(handler.stopRecordingAndWait(deadline: .now() + 10))
+        XCTAssertTrue(outcome.finished)
+        XCTAssertEqual(outcome.path, outputPath)
+        XCTAssertFalse(handler.isRecording)
+        XCTAssertNil(
+            handler.stopRecordingAndWait(deadline: .now() + 1),
+            "A second terminate-style stop has nothing to finalize."
+        )
+
+        let asset = AVURLAsset(url: URL(fileURLWithPath: outputPath))
+        let videoTrack = try XCTUnwrap(asset.tracks(withMediaType: .video).first)
+        XCTAssertNotNil(asset.tracks(withMediaType: .audio).first)
+        XCTAssertGreaterThan(CMTimeGetSeconds(asset.duration), 0)
+        XCTAssertGreaterThanOrEqual(try presentationTimes(asset: asset, track: videoTrack).count, 10)
+    }
+
+    func testUnfinalizedFragmentedRecordingIsReadable() throws {
+        let profile = try fallbackProfile()
+        let handler = RecordHandler(timeline: RecordingTimeline(clock: { self.time(10) }))
+        let outputPath = try handler.startRecording(
+            width: Int(profile.width),
+            height: Int(profile.height),
+            targetFps: profile.framesPerSecond,
+            targetBitrate: 1_000_000,
+            enableAudio: false
+        )
+        defer { try? FileManager.default.removeItem(atPath: outputPath) }
+
+        // Three seconds of media crosses at least two fragment boundaries.
+        var appended = 0
+        for frame in 0..<90 {
+            if appendWhenReady(handler, try videoSample(
+                presentation: 10 + Double(frame) / 30,
+                width: Int(profile.width),
+                height: Int(profile.height)
+            )) {
+                appended += 1
+            }
+        }
+        XCTAssertEqual(appended, 90)
+
+        // Snapshot the file while the writer is still open, as a crash or a
+        // kill would leave it: no finishWriting, no trailing moov update.
+        let snapshotPath = NSTemporaryDirectory() + "camera_desktop_fragment_\(UUID().uuidString).mp4"
+        defer { try? FileManager.default.removeItem(atPath: snapshotPath) }
+        let deadline = Date().addingTimeInterval(5)
+        var readable = false
+        while !readable && Date() < deadline {
+            try? FileManager.default.removeItem(atPath: snapshotPath)
+            try FileManager.default.copyItem(atPath: outputPath, toPath: snapshotPath)
+            readable = RecordHandler.isReadableRecording(atPath: snapshotPath)
+            if !readable { Thread.sleep(forTimeInterval: 0.05) }
+        }
+        XCTAssertTrue(readable, "An unfinalized fragmented MP4 should keep its written fragments.")
+
+        let stopped = expectation(description: "Recording finalizes")
+        handler.stopRecording { _ in stopped.fulfill() }
+        wait(for: [stopped], timeout: 10)
+    }
+
+    /// Real-time writer inputs briefly report not ready when samples arrive
+    /// faster than capture would deliver them; retry like a camera would.
+    private func appendWhenReady(_ handler: RecordHandler, _ sample: CMSampleBuffer) -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            if handler.appendVideoBuffer(sample) { return true }
+            Thread.sleep(forTimeInterval: 0.002)
+        }
+        return false
+    }
+
+    private func fallbackProfile() throws -> RecordingQuality.Profile {
+        let profile = RecordingQuality.Profile(width: 640, height: 480, framesPerSecond: 30)
+        try XCTSkipUnless(
+            RecordingQuality.supportsEncoding(profile: profile),
+            "This Mac has no H.264 encoder for the fallback recording profile."
+        )
+        return profile
+    }
+
     private func videoSample(
         presentation: Double,
         width: Int,

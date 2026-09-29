@@ -4,6 +4,10 @@
   handler and the other backends use (`message` is still sent), so session
   runtime errors and interruptions reach `CameraController.value.errorDescription`.
   The Dart handler also accepts the legacy `message` key (#22).
+* macOS: recordings are written as fragmented MP4 with one-second fragments,
+  and app termination waits up to five seconds for an active recording to
+  finalize, without relying on the main run loop. A recording cut short stays
+  readable up to its last fragment (#29).
 
 ## 1.2.1
 

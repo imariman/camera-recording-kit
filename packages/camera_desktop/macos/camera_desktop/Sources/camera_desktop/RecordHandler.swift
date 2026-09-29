@@ -12,6 +12,11 @@ class RecordHandler: NSObject {
     private var recording = false
     private(set) var selectedVideoCodec: RecordingQuality.VideoCodec?
 
+    /// How often AVAssetWriter writes a movie fragment. A fragmented MP4 that
+    /// was never finalized (process killed, crash) still contains every
+    /// completed fragment, so at most this much media is lost.
+    static let movieFragmentInterval = CMTime(value: 1, timescale: 1)
+
     var isRecording: Bool {
         lock.lock()
         let value = recording
@@ -67,6 +72,7 @@ class RecordHandler: NSObject {
         let url = URL(fileURLWithPath: path)
 
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        writer.movieFragmentInterval = RecordHandler.movieFragmentInterval
 
         let profile = RecordingQuality.Profile(
             width: Int32(width),
@@ -272,13 +278,18 @@ class RecordHandler: NSObject {
     ///
     /// When no file can be produced, the partially written temporary file is
     /// deleted before `completion` receives `nil`.
+    ///
+    /// `completion` runs on an arbitrary queue (never dispatched through the
+    /// main queue), or synchronously when nothing was recording.
     /// - Parameter completion: Called with the output file path on success, or nil on failure.
-    func stopRecording(completion: @escaping (String?) -> Void) {
+    /// - Returns: `true` when this call stopped an active recording.
+    @discardableResult
+    func stopRecording(completion: @escaping (String?) -> Void) -> Bool {
         lock.lock()
         guard recording, let writer = assetWriter else {
             lock.unlock()
             completion(nil)
-            return
+            return false
         }
 
         recording = false
@@ -302,7 +313,7 @@ class RecordHandler: NSObject {
             writer.cancelWriting()
             RecordHandler.removeFile(atPath: path)
             completion(nil)
-            return
+            return true
         }
 
         vInput?.markAsFinished()
@@ -316,6 +327,39 @@ class RecordHandler: NSObject {
                 completion(nil)
             }
         }
+        return true
+    }
+
+    /// Stops and finalizes the recording, blocking the calling thread until
+    /// the file is finalized or `deadline` passes.
+    ///
+    /// Intended for app termination, which runs on the main thread: nothing
+    /// in this path waits for the main queue or run loop, so it cannot
+    /// deadlock there. A recording whose finalize misses the deadline is
+    /// still recoverable up to its last movie fragment.
+    /// - Returns: `nil` when nothing was recording; otherwise whether the
+    ///   finalize completed in time and the resulting path.
+    func stopRecordingAndWait(deadline: DispatchTime) -> (finished: Bool, path: String?)? {
+        let finalized = DispatchSemaphore(value: 0)
+        let outcome = FinalizeOutcome()
+        let stopped = stopRecording { path in
+            outcome.path = path
+            finalized.signal()
+        }
+        guard stopped else { return nil }
+        guard finalized.wait(timeout: deadline) == .success else {
+            return (false, nil)
+        }
+        return (true, outcome.path)
+    }
+
+    /// Whether the file at `path` has a video track and a positive duration.
+    /// Loads the asset synchronously; do not call on the main thread.
+    static func isReadableRecording(atPath path: String) -> Bool {
+        let asset = AVURLAsset(url: URL(fileURLWithPath: path))
+        guard !asset.tracks(withMediaType: .video).isEmpty else { return false }
+        let seconds = CMTimeGetSeconds(asset.duration)
+        return seconds.isFinite && seconds > 0
     }
 
     /// Best-effort removal of an unfinalized recording file.
@@ -324,8 +368,22 @@ class RecordHandler: NSObject {
         try? FileManager.default.removeItem(atPath: path)
     }
 
+    /// Test hook: the active writer.
+    var assetWriterForTesting: AVAssetWriter? {
+        lock.lock()
+        defer { lock.unlock() }
+        return assetWriter
+    }
+
     /// Generates a unique temporary file path for a video recording.
     static func generatePath() -> String {
         return NSTemporaryDirectory() + "camera_desktop_video_\(UUID().uuidString).mp4"
     }
+}
+
+/// Carries the finalized path from the writer's completion queue to the
+/// thread waiting in `stopRecordingAndWait`. The semaphore orders the write
+/// before the read.
+private final class FinalizeOutcome {
+    var path: String?
 }
