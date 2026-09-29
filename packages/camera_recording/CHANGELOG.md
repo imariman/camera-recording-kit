@@ -1,4 +1,4 @@
-## Unreleased
+## 0.3.0
 
 * A stop rejected by the platform (for example an Android recording finalized
   without a usable file) no longer leaves the service reporting an active
