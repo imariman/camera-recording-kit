@@ -87,7 +87,8 @@ enum RecordingQuality {
     supportsEncoding: (_ width: Int32, _ height: Int32, _ fps: Int, _ codec: VideoCodec) -> Bool
   ) -> [String: Any] {
     var deviceProfiles = Set<Profile>()
-    for format in device.flutterFormats {
+    for format in device.flutterFormats
+    where FormatUtils.isSelectable(format, videoDimensionsConverter: videoDimensionsConverter) {
       let dimensions = videoDimensionsConverter(format)
       for requested in requestedProfiles
       where dimensions.width == requested.width && dimensions.height == requested.height

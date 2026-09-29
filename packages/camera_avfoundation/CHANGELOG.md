@@ -27,6 +27,31 @@
   fails with a clear message instead of finalizing an empty writer.
 * `startVideoRecording` fails while the previous recording is still being
   finalized.
+* Reports the preview size of the format actually applied for an explicit
+  frame rate, instead of the previous active format (stretched preview).
+* `updateDescriptionWhileRecording` no longer leaves the session half
+  configured or completes twice on failure; it restores the previous camera,
+  keeps pause/resume timing on the new output, and re-applies the recording
+  format and frame duration to the new device.
+* Skips `btp2` and 1:1 formats when selecting an exact recording format and
+  when advertising recording capabilities.
+* `setVideoStabilizationMode` completes once the connection's active mode
+  reflects the request (at most one second), so `recordingQualityApplied`
+  no longer reports stale stabilization state.
+* `dispose` only closes the camera registered under the given ID, and `create`
+  unregisters the texture of the camera it replaces.
+* Always completes pending calls (`stopVideoRecording`,
+  `waitForRecordingFocus`, `takePicture`, and calls made after the camera was
+  closed) instead of leaving the Dart future hanging; calls without a camera
+  fail with `cameraNotFound`.
+* Updates interruption and writer-completion state on the capture session
+  queue.
+* Maps focus and exposure points with the locked capture orientation or the
+  last delivered device orientation; a flat or unknown orientation falls back
+  to the last known interface orientation.
+* `create` with an unknown camera name fails with `cameraNotFound` instead of
+  crashing, and a missing audio device is reported instead of crashing.
+* Documents that front camera recordings are mirrored in the file.
 
 ## 0.10.2
 

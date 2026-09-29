@@ -31,5 +31,14 @@ configuration. Creating a camera whose output does not offer the selected codec
 fails with `unsupportedRecordingProfile`, and `recordingQualityApplied` reports
 the codec taken from the writer settings rather than the request.
 
+## Front camera mirroring
+
+Front camera frames are mirrored (`AVCaptureConnection.isVideoMirrored`), like
+the system camera preview. The same connection feeds the `AVAssetWriter`, so
+front camera recordings are mirrored in the saved file as well. This backend
+has no API to turn mirroring off; the macOS backend offers `setMirror(false)`
+and the Android backend does not mirror recordings. Flip the file in
+post-processing if an unmirrored front camera recording is required.
+
 [1]: https://pub.dev/packages/camera
 [2]: https://flutter.dev/to/endorsed-federated-plugin

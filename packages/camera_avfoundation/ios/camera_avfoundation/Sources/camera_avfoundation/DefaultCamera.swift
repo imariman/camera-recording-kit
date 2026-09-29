@@ -86,10 +86,15 @@ final class DefaultCamera: NSObject, Camera {
   private var previewSize: CGSize?
   var deviceOrientation: UIDeviceOrientation {
     didSet {
+      if deviceOrientation.isValidInterfaceOrientation {
+        lastValidOrientation = deviceOrientation
+      }
       guard deviceOrientation != oldValue else { return }
       updateOrientation()
     }
   }
+  /// The last interface-valid orientation seen, used when the device lies flat.
+  private var lastValidOrientation: UIDeviceOrientation
 
   /// Tracks the latest pixel buffer sent from AVFoundation's sample buffer delegate callback.
   /// Used to deliver the latest pixel buffer to the flutter engine via the `copyPixelBuffer` API.
@@ -143,9 +148,18 @@ final class DefaultCamera: NSObject, Camera {
   /// after such a change, so an idle reading right after it is not convergence.
   /// Accessed only on `captureSessionQueue`.
   private var lastMeteringChange: DispatchTime?
-  /// How long an idle reading must follow a metering change before it is trusted,
-  /// unless the device was already seen adjusting after that change.
-  private static let meteringSettleWindow = DispatchTimeInterval.milliseconds(150)
+  /// Upper bound for waiting until `activeVideoStabilizationMode` reflects a new preference.
+  private static let stabilizationReadbackTimeout = DispatchTimeInterval.seconds(1)
+
+  static let cameraErrorDomain = "dev.teleprompter.camera"
+  static let cameraNotFoundErrorCode = 1
+
+  static func cameraNotFoundError(_ cameraName: String) -> NSError {
+    return NSError(
+      domain: cameraErrorDomain,
+      code: cameraNotFoundErrorCode,
+      userInfo: [NSLocalizedDescriptionKey: "Camera '\(cameraName)' is unavailable."])
+  }
 
   private static func pigeonErrorFromNSError(_ error: NSError) -> PigeonError {
     return PigeonError(
@@ -169,16 +183,29 @@ final class DefaultCamera: NSObject, Camera {
     ]
     captureVideoOutput.alwaysDiscardsLateVideoFrames = true
 
-    // Setup video capture connection.
-    let connection = AVCaptureConnection(
-      inputPorts: captureVideoInput.ports,
-      output: captureVideoOutput.avOutput)
-
-    if captureDevice.position == .front {
-      connection.isVideoMirrored = true
-    }
+    let connection = makeVideoConnection(
+      input: captureVideoInput,
+      output: captureVideoOutput,
+      position: captureDevice.position)
 
     return (captureVideoInput, captureVideoOutput, connection)
+  }
+
+  /// Creates the video connection between `input` and `output`.
+  ///
+  /// Front camera frames are mirrored, like the system camera preview. The mirroring applies to
+  /// the connection feeding both the preview and the `AVAssetWriter`, so front camera recordings
+  /// are mirrored in the file as well (see the package README).
+  private static func makeVideoConnection(
+    input: CaptureInput,
+    output: CaptureVideoDataOutput,
+    position: AVCaptureDevice.Position
+  ) -> AVCaptureConnection {
+    let connection = AVCaptureConnection(inputPorts: input.ports, output: output.avOutput)
+    if position == .front {
+      connection.isVideoMirrored = true
+    }
+    return connection
   }
 
   init(configuration: CameraConfiguration) throws {
@@ -196,7 +223,10 @@ final class DefaultCamera: NSObject, Camera {
     videoDimensionsConverter = configuration.videoDimensionsConverter
     deviceOrientationProvider = configuration.deviceOrientationProvider
 
-    captureDevice = videoCaptureDeviceFactory(configuration.initialCameraName)
+    guard let initialDevice = videoCaptureDeviceFactory(configuration.initialCameraName) else {
+      throw DefaultCamera.cameraNotFoundError(configuration.initialCameraName)
+    }
+    captureDevice = initialDevice
     flashMode = captureDevice.hasFlash ? .auto : .off
 
     capturePhotoOutput = AVCapturePhotoOutput()
@@ -205,6 +235,9 @@ final class DefaultCamera: NSObject, Camera {
     videoCaptureSession.automaticallyConfiguresApplicationAudioSession = false
     audioCaptureSession.automaticallyConfiguresApplicationAudioSession = false
 
+    lastValidOrientation =
+      configuration.orientation.isValidInterfaceOrientation
+      ? configuration.orientation : configuration.fallbackOrientation
     deviceOrientation = configuration.orientation
 
     let connection: AVCaptureConnection
@@ -250,6 +283,11 @@ final class DefaultCamera: NSObject, Camera {
       }
 
       captureDevice.flutterActiveFormat = exactFormat
+      // `setCaptureSessionPreset` derived the preview size from the previous active format: the
+      // preset change is deferred until commit. Use the format that is actually applied.
+      let exactDimensions = videoDimensionsConverter(exactFormat)
+      previewSize = CGSize(
+        width: CGFloat(exactDimensions.width), height: CGFloat(exactDimensions.height))
       framesPerSecond = requestedFramesPerSecond
       let duration = CMTimeMakeWithSeconds(1.0 / requestedFramesPerSecond, preferredTimescale: 60_000)
       mediaSettingsAVWrapper.setMinFrameDuration(duration, on: captureDevice)
@@ -515,27 +553,17 @@ final class DefaultCamera: NSObject, Camera {
     var maxPixelCount: UInt = 0
     var isBestSubTypePreferred = false
 
-    // These formats are compressed and lossy, and unsupported by the Flutter Engine.
-    let unsupportedSubTypes: [FourCharCode] = [
-      1_651_798_066  // Hex for 'btp2', or kCVPixelFormatType_96VersatileBayerPacked12
-    ]
-
     for format in captureDevice.flutterFormats {
-      let subType = CMFormatDescriptionGetMediaSubType(format.formatDescription)
-
-      // Skip formats that will crash the Flutter Engine
-      if unsupportedSubTypes.contains(subType) {
+      // Skip formats that crash the Flutter engine (btp2) and 1:1 centre stage formats.
+      guard FormatUtils.isSelectable(format, videoDimensionsConverter: videoDimensionsConverter)
+      else {
         continue
       }
 
+      let subType = CMFormatDescriptionGetMediaSubType(format.formatDescription)
       let resolution = videoDimensionsConverter(format)
       let height = UInt(resolution.height)
       let width = UInt(resolution.width)
-
-      // Guard against 1:1 resolutions provided by the iPhone 17 centre stage sensor.
-      if height == width {
-        continue
-      }
 
       let pixelCount = height * width
       let isSubTypePreferred = subType == preferredSubType
@@ -555,7 +583,10 @@ final class DefaultCamera: NSObject, Camera {
     // Don't setup audio twice or we will lose the audio.
     guard mediaSettings.enableAudio && !isAudioSetup else { return }
 
-    let audioDevice = audioCaptureDeviceFactory()
+    guard let audioDevice = audioCaptureDeviceFactory() else {
+      reportErrorMessage("No audio capture device is available")
+      return
+    }
     do {
       // Create a device input with the device and add it to the session.
       // Setup the audio input.
@@ -1046,10 +1077,10 @@ final class DefaultCamera: NSObject, Camera {
       path: path,
       ioQueue: photoIOQueue,
       completionHandler: { [weak self] path, error in
-        guard let strongSelf = self else { return }
-
-        strongSelf.captureSessionQueue.async { [weak self] in
-          self?.inProgressSavePhotoDelegates.removeValue(forKey: settings.uniqueID)
+        if let strongSelf = self {
+          strongSelf.captureSessionQueue.async { [weak self] in
+            self?.inProgressSavePhotoDelegates.removeValue(forKey: settings.uniqueID)
+          }
         }
 
         if let error = error {
@@ -1220,7 +1251,7 @@ final class DefaultCamera: NSObject, Camera {
       return
     }
 
-    let orientation = UIDevice.current.orientation
+    let orientation = pointOfInterestOrientation()
     do {
       try captureDevice.lockForConfiguration()
     } catch {
@@ -1268,7 +1299,7 @@ final class DefaultCamera: NSObject, Camera {
       return
     }
 
-    let orientation = deviceOrientationProvider.orientation
+    let orientation = pointOfInterestOrientation()
     do {
       try captureDevice.lockForConfiguration()
     } catch {
@@ -1309,31 +1340,20 @@ final class DefaultCamera: NSObject, Camera {
     lastMeteringChange = DispatchTime.now()
   }
 
+  /// The orientation the Dart preview is shown in, see
+  /// `CaptureMetering.pointOfInterestOrientation`.
+  private func pointOfInterestOrientation() -> UIDeviceOrientation {
+    return CaptureMetering.pointOfInterestOrientation(
+      locked: lockedCaptureOrientation,
+      stored: deviceOrientation,
+      provided: deviceOrientationProvider.orientation,
+      fallback: lastValidOrientation)
+  }
+
   private func cgPoint(
     for point: PlatformPoint, withOrientation orientation: UIDeviceOrientation
-  )
-    -> CGPoint
-  {
-    var x = point.x
-    var y = point.y
-    switch orientation {
-    case .portrait:  // 90 ccw
-      y = 1 - point.x
-      x = point.y
-    case .portraitUpsideDown:  // 90 cw
-      x = 1 - point.y
-      y = point.x
-    case .landscapeRight:  // 180
-      x = 1 - point.x
-      y = 1 - point.y
-    case .landscapeLeft:
-      // No rotation required
-      break
-    default:
-      // No rotation required
-      break
-    }
-    return CGPoint(x: x, y: y)
+  ) -> CGPoint {
+    return CaptureMetering.pointOfInterest(x: point.x, y: point.y, orientation: orientation)
   }
 
   func setZoomLevel(
@@ -1383,10 +1403,47 @@ final class DefaultCamera: NSObject, Camera {
       )
       return
     }
-    if let connection = captureVideoOutput.connection(with: .video) {
-      connection.preferredVideoStabilizationMode = stabilizationMode
+    guard let connection = captureVideoOutput.connection(with: .video) else {
+      completion(.success(()))
+      return
     }
-    completion(.success(()))
+    connection.preferredVideoStabilizationMode = stabilizationMode
+
+    // `activeVideoStabilizationMode` follows the preference asynchronously, and callers read it
+    // back through `recordingQualityApplied` right after this completes. Complete once it
+    // reflects the preference, or after a bounded wait (it can legitimately stay `.off`).
+    guard videoCaptureSession.isRunning else {
+      completion(.success(()))
+      return
+    }
+    waitForStabilizationReadback(
+      connection: connection,
+      preferred: stabilizationMode,
+      deadline: .now() + DefaultCamera.stabilizationReadbackTimeout,
+      completion: completion)
+  }
+
+  private func waitForStabilizationReadback(
+    connection: CaptureConnection,
+    preferred: AVCaptureVideoStabilizationMode,
+    deadline: DispatchTime,
+    completion: @escaping (Result<Void, any Error>) -> Void
+  ) {
+    if CaptureMetering.isStabilizationSettled(
+      preferred: preferred, active: connection.activeVideoStabilizationMode)
+      || DispatchTime.now() >= deadline
+    {
+      completion(.success(()))
+      return
+    }
+    captureSessionQueue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+      guard let self else {
+        completion(.success(()))
+        return
+      }
+      self.waitForStabilizationReadback(
+        connection: connection, preferred: preferred, deadline: deadline, completion: completion)
+    }
   }
 
   func isVideoStabilizationModeSupported(_ mode: PlatformVideoStabilizationMode) -> Bool {
@@ -1462,18 +1519,19 @@ final class DefaultCamera: NSObject, Camera {
 
     let observedAt = isAdjusting ? now : adjustmentObservedAt
     captureSessionQueue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
-      self?.waitForFocusAndExposure(
+      guard let self else {
+        // The camera was closed while waiting; report no convergence instead of never replying.
+        completion(false)
+        return
+      }
+      self.waitForFocusAndExposure(
         deadline: deadline, adjustmentObservedAt: observedAt, completion: completion)
     }
   }
 
-  /// Whether an idle focus/exposure reading means convergence: no metering change
-  /// is pending, the device was seen adjusting after the latest change, or the
-  /// settle window has passed without AVFoundation starting an adjustment.
   private func hasMeteringSettled(now: DispatchTime, adjustmentObservedAt: DispatchTime?) -> Bool {
-    guard let lastChange = lastMeteringChange else { return true }
-    if let observed = adjustmentObservedAt, observed >= lastChange { return true }
-    return now >= lastChange + Self.meteringSettleWindow
+    return CaptureMetering.hasSettled(
+      lastChange: lastMeteringChange, adjustmentObservedAt: adjustmentObservedAt, now: now)
   }
 
   func setFlashMode(
@@ -1571,27 +1629,39 @@ final class DefaultCamera: NSObject, Camera {
       return
     }
 
-    captureDevice = videoCaptureDeviceFactory(cameraName)
+    guard let newDevice = videoCaptureDeviceFactory(cameraName) else {
+      completion(
+        .failure(
+          PigeonError(
+            code: "cameraNotFound",
+            message: DefaultCamera.cameraNotFoundError(cameraName).localizedDescription,
+            details: nil)))
+      return
+    }
 
-    let oldConnection = captureVideoOutput.connection(with: .video)
-
-    // Stop video capture from the old output.
-    captureVideoOutput.setSampleBufferDelegate(nil, queue: nil)
-
-    // Remove the old video capture connections.
-    videoCaptureSession.beginConfiguration()
-    videoCaptureSession.removeInput(captureVideoInput)
-    videoCaptureSession.removeOutput(captureVideoOutput.avOutput)
-
-    let newConnection: AVCaptureConnection
-
+    // Everything that can fail without touching the session is resolved first, so a failure
+    // leaves the running recording untouched.
+    let requiredFormat: CaptureDeviceFormat?
     do {
-      (captureVideoInput, captureVideoOutput, newConnection) = try DefaultCamera.createConnection(
-        captureDevice: captureDevice,
+      requiredFormat = try self.requiredFormat(for: newDevice)
+    } catch {
+      completion(
+        .failure(
+          PigeonError(
+            code: "VideoError",
+            message: error.localizedDescription,
+            details: nil)))
+      return
+    }
+
+    let newInput: CaptureInput
+    let newOutput: CaptureVideoDataOutput
+    let newConnection: AVCaptureConnection
+    do {
+      (newInput, newOutput, newConnection) = try DefaultCamera.createConnection(
+        captureDevice: newDevice,
         videoFormat: videoFormat,
         captureDeviceInputFactory: captureDeviceInputFactory)
-
-      captureVideoOutput.setSampleBufferDelegate(self, queue: captureSessionQueue)
     } catch {
       completion(
         .failure(
@@ -1602,44 +1672,124 @@ final class DefaultCamera: NSObject, Camera {
       return
     }
 
+    let oldDevice = captureDevice
+    let oldInput = captureVideoInput
+    let oldOutput = captureVideoOutput
+    let oldConnection = oldOutput.connection(with: .video)
+
     // Keep the same orientation the old connections had.
     if let oldConnection = oldConnection, newConnection.isVideoOrientationSupported {
       newConnection.videoOrientation = oldConnection.videoOrientation
     }
 
-    // Add the new connections to the session.
-    if !videoCaptureSession.canAddInput(captureVideoInput) {
-      completion(
-        .failure(
-          PigeonError(
-            code: "VideoError",
-            message: "Unable to switch video input",
-            details: nil)))
-    }
-    videoCaptureSession.addInputWithNoConnections(captureVideoInput)
+    // Stop video capture from the old output.
+    oldOutput.setSampleBufferDelegate(nil, queue: nil)
 
-    if !videoCaptureSession.canAddOutput(captureVideoOutput.avOutput) {
-      completion(
-        .failure(
-          PigeonError(
-            code: "VideoError",
-            message: "Unable to switch video output",
-            details: nil)))
-    }
-    videoCaptureSession.addOutputWithNoConnections(captureVideoOutput.avOutput)
+    videoCaptureSession.beginConfiguration()
+    // Every path below commits the configuration exactly once.
+    videoCaptureSession.removeInput(oldInput)
+    videoCaptureSession.removeOutput(oldOutput.avOutput)
 
-    if !videoCaptureSession.canAddConnection(newConnection) {
-      completion(
-        .failure(
-          PigeonError(
-            code: "VideoError",
-            message: "Unable to switch video connection",
-            details: nil)))
+    if let failure = attachVideo(input: newInput, output: newOutput, connection: newConnection) {
+      // Restore the previous camera so the recording continues from it.
+      let restoredConnection = DefaultCamera.makeVideoConnection(
+        input: oldInput, output: oldOutput, position: oldDevice.position)
+      if let oldConnection = oldConnection, restoredConnection.isVideoOrientationSupported {
+        restoredConnection.videoOrientation = oldConnection.videoOrientation
+      }
+      if attachVideo(input: oldInput, output: oldOutput, connection: restoredConnection) != nil {
+        reportErrorMessage("Unable to restore the previous camera after a failed switch")
+      }
+      oldOutput.setSampleBufferDelegate(self, queue: captureSessionQueue)
+      videoCaptureSession.commitConfiguration()
+      completion(.failure(failure))
+      return
     }
-    videoCaptureSession.addConnection(newConnection)
+
+    captureDevice = newDevice
+    captureVideoInput = newInput
+    captureVideoOutput = newOutput
+    newOutput.setSampleBufferDelegate(self, queue: captureSessionQueue)
+
+    // Timing offsets were tracked on the old output; without re-pointing, a later pause/resume
+    // would wait forever for a sample from an output that is no longer attached.
+    if outputForOffsetAdjusting == oldOutput.avOutput {
+      outputForOffsetAdjusting = newOutput.avOutput
+    }
+
+    // Apply the same format and frame duration the camera was configured with.
+    if let requiredFormat = requiredFormat {
+      do {
+        try mediaSettingsAVWrapper.lockDevice(newDevice)
+        defer { mediaSettingsAVWrapper.unlockDevice(newDevice) }
+        newDevice.flutterActiveFormat = requiredFormat
+        if let framesPerSecond = framesPerSecond {
+          let duration = CMTimeMakeWithSeconds(1.0 / framesPerSecond, preferredTimescale: 60_000)
+          mediaSettingsAVWrapper.setMinFrameDuration(duration, on: newDevice)
+          mediaSettingsAVWrapper.setMaxFrameDuration(duration, on: newDevice)
+        }
+      } catch {
+        reportErrorMessage(
+          "Unable to apply the recording format to the new camera: \(error.localizedDescription)")
+      }
+    }
+
     videoCaptureSession.commitConfiguration()
-
     completion(.success(()))
+  }
+
+  /// The device format `init` selected explicitly (an exact recording profile or `.max`), looked
+  /// up on `device`; nil when the session preset determines the format.
+  private func requiredFormat(for device: CaptureDevice) throws -> CaptureDeviceFormat? {
+    if let framesPerSecond = framesPerSecond {
+      let targetResolution = try exactRecordingResolution(for: mediaSettings.resolutionPreset)
+      guard
+        let format = FormatUtils.findExactFormat(
+          for: device,
+          targetResolution: targetResolution,
+          targetFrameRate: framesPerSecond,
+          videoDimensionsConverter: videoDimensionsConverter)
+      else {
+        throw recordingProfileError(
+          width: targetResolution.width,
+          height: targetResolution.height,
+          framesPerSecond: Int64(framesPerSecond))
+      }
+      return format
+    }
+    if mediaSettings.resolutionPreset == .max {
+      return highestResolutionFormat(forCaptureDevice: device)
+    }
+    return nil
+  }
+
+  /// Adds `input`, `output` and `connection` to the video session. On failure, whatever was added
+  /// is removed again and the error to report is returned. Must be called inside a
+  /// `beginConfiguration`/`commitConfiguration` pair.
+  private func attachVideo(
+    input: CaptureInput,
+    output: CaptureVideoDataOutput,
+    connection: AVCaptureConnection
+  ) -> PigeonError? {
+    guard videoCaptureSession.canAddInput(input) else {
+      return PigeonError(code: "VideoError", message: "Unable to switch video input", details: nil)
+    }
+    videoCaptureSession.addInputWithNoConnections(input)
+
+    guard videoCaptureSession.canAddOutput(output.avOutput) else {
+      videoCaptureSession.removeInput(input)
+      return PigeonError(code: "VideoError", message: "Unable to switch video output", details: nil)
+    }
+    videoCaptureSession.addOutputWithNoConnections(output.avOutput)
+
+    guard videoCaptureSession.canAddConnection(connection) else {
+      videoCaptureSession.removeOutput(output.avOutput)
+      videoCaptureSession.removeInput(input)
+      return PigeonError(
+        code: "VideoError", message: "Unable to switch video connection", details: nil)
+    }
+    videoCaptureSession.addConnection(connection)
+    return nil
   }
 
   func startImageStream(
