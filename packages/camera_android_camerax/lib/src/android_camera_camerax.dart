@@ -377,6 +377,10 @@ class AndroidCameraCameraX extends CameraPlatform {
     CameraDescription cameraDescription,
     MediaSettings? mediaSettings,
   ) async {
+    // This platform instance outlives the cameras it creates, so values set
+    // on a previous camera must not leak into this one.
+    _resetPerCameraState();
+
     enableRecordingAudio = mediaSettings?.enableAudio ?? false;
     final CameraPermissionsError? error = await systemServicesManager
         .requestCameraPermissions(enableRecordingAudio);
@@ -534,11 +538,31 @@ class AndroidCameraCameraX extends CameraPlatform {
   /// Releases the resources of the accessed camera with ID [cameraId].
   @override
   Future<void> dispose(int cameraId) async {
+    _resetPerCameraState();
     await preview?.releaseSurfaceProvider();
     await liveCameraState?.removeObservers();
     await processCameraProvider?.unbindAll();
     await imageAnalysis?.clearAnalyzer();
     await deviceOrientationManager.stopListeningForDeviceOrientationChange();
+  }
+
+  /// Resets the focus, exposure, flash/torch, orientation-lock and preview
+  /// state that belongs to a single created camera to its defaults.
+  ///
+  /// Called when a camera is created and disposed. The setters above skip work
+  /// when they believe a value is already applied, so a stale value from a
+  /// previous camera would otherwise make them silently no-op on the new one.
+  void _resetPerCameraState() {
+    currentFocusMeteringAction = null;
+    _currentFocusMode = FocusMode.auto;
+    _currentExposureMode = ExposureMode.auto;
+    _defaultFocusPointLocked = false;
+    _currentFlashMode = null;
+    torchEnabled = false;
+    captureOrientationLocked = false;
+    _lockedCaptureOrientation = null;
+    shouldSetDefaultRotation = false;
+    _previewIsPaused = false;
   }
 
   /// The camera with ID [cameraId] has been initialized.

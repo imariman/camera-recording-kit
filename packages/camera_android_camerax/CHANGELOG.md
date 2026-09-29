@@ -1,3 +1,9 @@
+## Unreleased
+
+* Resets per-camera focus, exposure, flash/torch, capture-orientation lock and
+  paused-preview state when a camera is created or disposed, so a setting made
+  on a previous camera no longer makes the same call a no-op on the next one.
+
 ## 0.7.4+3
 
 * Adds exact-format codec capability metadata and explicit rejection when

@@ -2505,6 +2505,114 @@ void main() {
     },
   );
 
+  group('per-camera state', () {
+    const testCameraDescription = CameraDescription(
+      name: 'cameraName',
+      lensDirection: CameraLensDirection.back,
+      sensorOrientation: 90,
+    );
+
+    late AndroidCameraCameraX camera;
+    late MockCameraControl mockCameraControl;
+
+    setUp(() {
+      camera = AndroidCameraCameraX();
+      mockCameraControl = MockCameraControl();
+      final mockProcessCameraProvider = MockProcessCameraProvider();
+      final mockCamera = MockCamera();
+      final mockCameraInfo = MockCameraInfo();
+      final mockFocusMeteringResult = MockFocusMeteringResult();
+
+      setUpOverridesForTestingUseCaseConfiguration(mockProcessCameraProvider);
+      setUpOverridesForSettingFocusandExposurePoints(
+        mockCameraControl,
+        MockCamera2CameraControl(),
+      );
+
+      when(
+        mockProcessCameraProvider.bindToLifecycle(any, any),
+      ).thenAnswer((_) async => mockCamera);
+      when(mockCamera.getCameraInfo()).thenAnswer((_) async => mockCameraInfo);
+      when(mockCamera.cameraControl).thenReturn(mockCameraControl);
+      when(
+        mockCameraInfo.getCameraState(),
+      ).thenAnswer((_) async => MockLiveCameraState());
+      when(mockFocusMeteringResult.isFocusSuccessful).thenReturn(true);
+      when(
+        mockCameraControl.startFocusAndMetering(any),
+      ).thenAnswer((_) async => mockFocusMeteringResult);
+    });
+
+    Future<int> createAndInitializeCamera() async {
+      final int cameraId = await camera.createCameraWithSettings(
+        testCameraDescription,
+        const MediaSettings(),
+      );
+      await camera.initializeCamera(cameraId);
+      return cameraId;
+    }
+
+    /// Locks focus, turns the torch on and locks the capture orientation.
+    Future<void> changeStateOnCamera(int cameraId) async {
+      await camera.setFocusMode(cameraId, FocusMode.locked);
+      await camera.setFlashMode(cameraId, FlashMode.torch);
+      await camera.lockCaptureOrientation(
+        cameraId,
+        DeviceOrientation.landscapeLeft,
+      );
+      expect(camera.torchEnabled, isTrue);
+      expect(camera.captureOrientationLocked, isTrue);
+      expect(camera.shouldSetDefaultRotation, isTrue);
+      expect(camera.currentFocusMeteringAction, isNotNull);
+    }
+
+    /// Verifies the second camera starts from defaults and that the setters
+    /// short-circuited by stale state actually apply again.
+    Future<void> expectSecondCameraStartsFromDefaults(int cameraId) async {
+      expect(camera.torchEnabled, isFalse);
+      expect(camera.captureOrientationLocked, isFalse);
+      expect(camera.shouldSetDefaultRotation, isFalse);
+      expect(camera.currentFocusMeteringAction, isNull);
+
+      clearInteractions(mockCameraControl);
+      await camera.setFocusMode(cameraId, FocusMode.locked);
+      final FocusMeteringAction lockedAction =
+          verify(
+                mockCameraControl.startFocusAndMetering(captureAny),
+              ).captured.single
+              as FocusMeteringAction;
+      expect(lockedAction.isAutoCancelEnabled, isFalse);
+
+      await camera.setFlashMode(cameraId, FlashMode.torch);
+      verify(mockCameraControl.enableTorch(true));
+    }
+
+    test(
+      'createCamera resets state left by a previous camera that was not disposed',
+      () async {
+        await changeStateOnCamera(await createAndInitializeCamera());
+
+        await expectSecondCameraStartsFromDefaults(
+          await createAndInitializeCamera(),
+        );
+      },
+    );
+
+    test('dispose resets per-camera state before the next camera', () async {
+      final int firstCameraId = await createAndInitializeCamera();
+      await changeStateOnCamera(firstCameraId);
+
+      await camera.dispose(firstCameraId);
+      expect(camera.torchEnabled, isFalse);
+      expect(camera.captureOrientationLocked, isFalse);
+      expect(camera.currentFocusMeteringAction, isNull);
+
+      await expectSecondCameraStartsFromDefaults(
+        await createAndInitializeCamera(),
+      );
+    });
+  });
+
   test('onCameraInitialized stream emits CameraInitializedEvents', () async {
     final camera = AndroidCameraCameraX();
     const cameraId = 16;
