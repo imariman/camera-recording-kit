@@ -27,6 +27,12 @@
 * macOS: a rejected `create` consumes the one-shot codec selection, photo
   paths are unique within the same millisecond, and camera modes within
   0.1 FPS of the requested 30/60 FPS (for example 29.97) are accepted (#32).
+* Image stream (all desktop platforms): cancelling while `startImageStream` is
+  in flight stops the right native stream and starts no poller, `dispose`
+  stops FFI pollers whose subscriber never cancelled, a failing
+  `stopImageStream` no longer skips releasing the FFI reader, a restarted
+  stream does not deliver the previous stream's last frame, torn frames are
+  dropped, and a failing `startImageStream` is reported on the stream (#32).
 ## 1.2.1
 
 * Adds macOS encoder-validated H.264/HEVC capability metadata and one-shot
