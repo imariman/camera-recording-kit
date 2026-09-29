@@ -63,6 +63,14 @@ class CameraService {
   AppliedRecordingProfile? _captureProfile;
   bool _focusLockUnavailable = false;
 
+  /// Whether formats are negotiated and verified by native readback.
+  ///
+  /// When false (a custom `controllerFactory`, or a host without a quality
+  /// backend such as Windows or Linux), only [RecordingProfile.recordAudio],
+  /// [RecordingProfile.lockOrientation], and [RecordingProfile.quality] are
+  /// honored, [appliedProfile] stays null, and a profile with an explicit
+  /// resolution, frame rate, bitrate, or codec is rejected with a
+  /// [CameraException] coded `unsupportedRecordingProfile`.
   bool get supportsQualitySelection =>
       _controllerFactory == null && _gateway.supportsQualitySelection;
   RecordingCapabilities get recordingCapabilities => _recordingCapabilities;
@@ -77,6 +85,10 @@ class CameraService {
   Future<RecordingResult?>? _disposeFuture;
   bool _disposeRequested = false;
   bool _videoStabilizationEnabled = false;
+
+  /// A stabilization change requested during a recording, applied to the
+  /// live controller once that recording stops.
+  bool _stabilizationPending = false;
   double _minimumZoomLevel = 1;
   double _maximumZoomLevel = 1;
   double _zoomLevel = 1;
@@ -149,20 +161,33 @@ class CameraService {
     return completer.future;
   }
 
-  /// Starts the selected camera and returns a controller ready for preview.
+  /// Starts a camera and returns a controller ready for preview.
+  ///
+  /// The camera is chosen in this order:
+  /// 1. [preferredName], when it names an available camera;
+  /// 2. the camera selected earlier in this service's lifetime (by a previous
+  ///    [initialize], [selectCamera], or [switchCamera]), so that
+  ///    `release()` followed by `initialize()` resumes on the camera the user
+  ///    switched to;
+  /// 3. the first camera facing [front], or the first camera.
+  ///
+  /// [front] therefore only applies to the first selection. To change the
+  /// camera later, pass [preferredName] or use [selectCamera]/[switchCamera].
   Future<CameraController?> initialize({
     required bool front,
     String preferredName = '',
     RecordingProfile? recordingProfile,
   }) async {
-    if (_disposeRequested) return null;
-    final profile = recordingProfile ?? _recordingProfile;
-    if (isRecording) return null;
-    final description =
-        _selectedCamera ?? cameraNamed(preferredName) ?? _select(front: front);
-    if (description == null) return null;
-
-    return _initializeDescription(description, profile);
+    if (_disposeRequested || isRecording) return null;
+    return _enqueue(() async {
+      final description =
+          cameraNamed(preferredName) ?? selectedCamera ?? _select(front: front);
+      if (description == null) return null;
+      return _initializeDescriptionInQueue(
+        description,
+        recordingProfile ?? _recordingProfile,
+      );
+    });
   }
 
   /// Starts the camera selected by name. If the list changed, preserves the
@@ -173,40 +198,76 @@ class CameraService {
   }) async {
     if (_disposeRequested) return null;
     final description = cameraNamed(name);
-    if (description == null) return null;
-    final profile = recordingProfile ?? _recordingProfile;
-    if (isRecording) return null;
-    if (selectedCamera == description && isInitialized) {
-      if (profile == _recordingProfile) return _controller;
-      final applied = await applyRecordingProfile(profile);
-      return applied ? _controller : null;
-    }
-    return _initializeDescription(description, profile);
+    if (description == null || isRecording) return null;
+    return _enqueue(() => _selectInQueue(description, recordingProfile));
   }
 
   /// Switches to the next camera in the list. This also exposes external webcams
   /// and Continuity Camera devices on desktop.
+  ///
+  /// The next camera is resolved when the queued switch runs, so rapid
+  /// repeated calls advance one camera each.
   Future<CameraController?> switchCamera({
     RecordingProfile? recordingProfile,
   }) async {
     if (_disposeRequested || _cameras.length < 2) return _controller;
-    final current = _selectedCamera ?? _controller?.description;
-    final currentIndex = current == null ? -1 : _cameras.indexOf(current);
-    final nextIndex = currentIndex < 0
-        ? 0
-        : (currentIndex + 1) % _cameras.length;
-    return selectCamera(
-      _cameras[nextIndex].name,
-      recordingProfile: recordingProfile,
-    );
+    if (isRecording) return null;
+    return _enqueue(() {
+      final current = selectedCamera;
+      final currentIndex = current == null ? -1 : _cameras.indexOf(current);
+      final nextIndex = currentIndex < 0
+          ? 0
+          : (currentIndex + 1) % _cameras.length;
+      return _selectInQueue(_cameras[nextIndex], recordingProfile);
+    });
   }
 
-  Future<CameraController?> _initializeDescription(
+  Future<CameraController?> _selectInQueue(
     CameraDescription description,
-    RecordingProfile recordingProfile,
+    RecordingProfile? recordingProfile,
   ) async {
-    return _enqueue(
-      () => _initializeDescriptionInQueue(description, recordingProfile),
+    if (_disposeRequested || isRecording) return null;
+    final profile = recordingProfile ?? _recordingProfile;
+    if (selectedCamera == description &&
+        isInitialized &&
+        !_requiresRebuild(profile)) {
+      _adoptProfile(profile);
+      return _controller;
+    }
+    return _initializeDescriptionInQueue(description, profile);
+  }
+
+  /// Whether [next] needs a new controller on the current camera.
+  ///
+  /// [RecordingProfile.quality] has no effect on quality-selection backends,
+  /// so a change to it alone does not tear down the preview there.
+  bool _requiresRebuild(RecordingProfile next) {
+    if (!supportsQualitySelection) return next != _recordingProfile;
+    return next.copyWith(quality: _recordingProfile.quality) !=
+        _recordingProfile;
+  }
+
+  /// Records [profile] as requested for the unchanged live configuration.
+  void _adoptProfile(RecordingProfile profile) {
+    _recordingProfile = profile;
+    _appliedProfile = _appliedProfile?.copyWith(requested: profile);
+  }
+
+  /// Backends without quality selection cannot apply or verify an explicit
+  /// resolution, frame rate, bitrate, or codec. Such a request is an error
+  /// instead of being silently dropped.
+  void _ensureLegacyProfileSupported(RecordingProfile profile) {
+    if (supportsQualitySelection) return;
+    if (profile.resolution == RecordingResolution.automatic &&
+        profile.fps == 30 &&
+        profile.bitratePreset == RecordingBitratePreset.automatic &&
+        profile.videoCodec == RecordingVideoCodec.h264) {
+      return;
+    }
+    throw CameraException(
+      'unsupportedRecordingProfile',
+      'This camera backend cannot apply an explicit resolution, frame rate, '
+          'bitrate, or codec. Use RecordingProfile.quality instead.',
     );
   }
 
@@ -216,6 +277,8 @@ class CameraService {
   ) async {
     // Guards belong inside the queue: a start may have won after enqueueing.
     if (_disposeRequested || isRecording) return null;
+    // Validate before tearing down a working preview.
+    _ensureLegacyProfileSupported(recordingProfile);
     final previous = _controller;
     final previousDescription = selectedCamera;
     final previousProfile = _recordingProfile;
@@ -224,7 +287,13 @@ class CameraService {
     // CameraX and some physical-camera backends reject two active controllers
     // for the same device. Fully release the old controller first; on failure,
     // restore the old description and profile.
-    await _releaseCurrentController();
+    try {
+      await _releaseCurrentController();
+    } catch (_) {
+      // The old controller is already detached from the service. A failed
+      // dispose must not leave the service without a camera, so the new
+      // controller (and, if needed, recovery) is still attempted.
+    }
 
     try {
       final controller = await _createInitializedController(
@@ -248,6 +317,8 @@ class CameraService {
         _selectedCamera = previousDescription;
         _recordingProfile = previousProfile;
       } catch (recoveryError, recoveryStackTrace) {
+        // No camera is active: drop anything a partial attempt may have left.
+        _resetControllerState();
         Error.throwWithStackTrace(
           CameraControllerRecoveryException(
             applyError: applyError,
@@ -265,23 +336,31 @@ class CameraService {
     RecordingProfile recordingProfile,
   ) async {
     _focusLockUnavailable = false;
+    // Every new controller receives the current preference directly.
+    _stabilizationPending = false;
     if (!supportsQualitySelection) {
+      // Both legacy branches honor the same subset of the profile: audio,
+      // orientation lock, and `quality` as a portable ResolutionPreset. The
+      // rest was rejected by _ensureLegacyProfileSupported, and no applied
+      // profile is reported because nothing can be read back.
+      _ensureLegacyProfileSupported(recordingProfile);
       final factory = _controllerFactory;
+      final preset = resolutionPresetFor(recordingProfile.quality);
       CameraController? controller;
       try {
         if (factory != null) {
           controller = factory(
             description: description,
-            resolutionPreset: resolutionPresetFor(recordingProfile.quality),
+            resolutionPreset: preset,
             enableAudio: recordingProfile.recordAudio,
           );
           await controller.initialize();
         } else {
           controller = await _gateway.createInitializedController(
             description: description,
-            preset: ResolutionPreset.max,
+            preset: preset,
             enableAudio: recordingProfile.recordAudio,
-            videoCodec: recordingProfile.videoCodec,
+            videoCodec: RecordingVideoCodec.h264,
           );
         }
         if (_capabilities.usesDesktopCameraBackend) {
@@ -361,13 +440,15 @@ class CameraService {
           locked: recordingProfile.lockOrientation,
         );
         await _loadManualControls(controller);
+        // An explicit target (480p included) applied exactly is not a
+        // fallback. Automatic accepts the best format of the lens, whatever
+        // its size, so only its frame rate and codec are compared.
         final isFallback =
             index > 0 ||
             format.fps != recordingProfile.fps ||
             (recordingProfile.resolution != RecordingResolution.automatic &&
                 format.shortSide != recordingProfile.resolution.height) ||
-            effectiveProfile.videoCodec != recordingProfile.videoCodec ||
-            format.shortSide < 720;
+            effectiveProfile.videoCodec != recordingProfile.videoCodec;
         _recordingCapabilities = capabilities;
         _appliedProfile = AppliedRecordingProfile(
           requested: recordingProfile,
@@ -375,7 +456,9 @@ class CameraService {
           cameraName: description.name,
           lensDirection: description.lensDirection.name,
           fallbackReason: isFallback
-              ? (index > 0 ? 'configurationRejected' : 'unsupportedProfile')
+              ? (index > 0
+                    ? RecordingFallbackReason.configurationRejected
+                    : RecordingFallbackReason.unsupportedProfile)
               : null,
           stabilizationEnabled: _videoStabilizationEnabled && stabilization,
         );
@@ -443,14 +526,28 @@ class CameraService {
           .clamp(_minimumExposureOffset, _maximumExposureOffset)
           .toDouble();
     } catch (_) {
-      _minimumZoomLevel = 1;
-      _maximumZoomLevel = 1;
-      _zoomLevel = 1;
-      _minimumExposureOffset = 0;
-      _maximumExposureOffset = 0;
-      _exposureOffsetStepSize = 0;
-      _exposureOffset = 0;
+      _resetManualControls();
     }
+  }
+
+  void _resetManualControls() {
+    _minimumZoomLevel = 1;
+    _maximumZoomLevel = 1;
+    _zoomLevel = 1;
+    _minimumExposureOffset = 0;
+    _maximumExposureOffset = 0;
+    _exposureOffsetStepSize = 0;
+    _exposureOffset = 0;
+  }
+
+  /// Clears every fact that describes the active controller. Called whenever
+  /// the controller is released, so a failed switch never reports the
+  /// previous camera's format, capabilities, or control ranges.
+  void _resetControllerState() {
+    _appliedProfile = null;
+    _recordingCapabilities = const RecordingCapabilities();
+    _focusLockUnavailable = false;
+    _resetManualControls();
   }
 
   Future<void> _applyOrientationLock(
@@ -507,11 +604,18 @@ class CameraService {
   /// Applies a recording profile only when recording is inactive. An initialized
   /// controller restarts for new audio or preset settings; while recording this
   /// returns `false` and leaves the current recording untouched.
+  ///
+  /// On quality-selection backends a change to [RecordingProfile.quality]
+  /// alone is recorded without restarting the camera, because it has no
+  /// effect there. Without quality selection an explicit resolution, frame
+  /// rate, bitrate, or codec throws a [CameraException] with code
+  /// `unsupportedRecordingProfile`.
   Future<bool> applyRecordingProfile(RecordingProfile recordingProfile) {
     if (_disposeRequested) return Future<bool>.value(false);
 
     return _enqueue(() async {
       if (_disposeRequested || isRecording) return false;
+      _ensureLegacyProfileSupported(recordingProfile);
 
       final description = selectedCamera;
       if (description == null || !isInitialized) {
@@ -519,7 +623,10 @@ class CameraService {
         return true;
       }
 
-      if (recordingProfile == _recordingProfile) return true;
+      if (!_requiresRebuild(recordingProfile)) {
+        _adoptProfile(recordingProfile);
+        return true;
+      }
       return await _initializeDescriptionInQueue(
             description,
             recordingProfile,
@@ -542,30 +649,52 @@ class CameraService {
   /// Remembers the preference even without a camera, applying the same intent
   /// to the next initialized or switched controller. Unsupported stabilization
   /// does not disrupt recording.
+  ///
+  /// Returns true when the preference is stored without a camera, or when it
+  /// was applied to the live controller. During a recording (including a
+  /// paused one) the live stream is left untouched and this returns false;
+  /// the preference is applied when that recording stops. [appliedProfile]
+  /// reports stabilization only after native readback confirms it.
   Future<bool> setVideoStabilizationEnabled(bool enabled) {
     if (_disposeRequested) return Future<bool>.value(false);
     return _enqueue(() async {
       _videoStabilizationEnabled = enabled;
       final controller = _controller;
-      if (controller == null || !controller.value.isInitialized) return true;
-      if (controller.value.isRecordingVideo) return true;
-      final applied = await _applyVideoStabilization(
-        controller,
-        enabled: enabled,
-      );
-      final profile = _appliedProfile;
-      if (profile != null) {
-        _appliedProfile = AppliedRecordingProfile(
-          requested: profile.requested,
-          format: profile.format,
-          cameraName: profile.cameraName,
-          lensDirection: profile.lensDirection,
-          fallbackReason: profile.fallbackReason,
-          stabilizationEnabled: enabled && applied,
-        );
+      if (controller == null || !controller.value.isInitialized) {
+        _stabilizationPending = false;
+        return true;
       }
-      return applied;
+      if (controller.value.isRecordingVideo) {
+        _stabilizationPending = true;
+        return false;
+      }
+      return _applyStabilizationToLiveController(controller);
     });
+  }
+
+  Future<bool> _applyStabilizationToLiveController(
+    CameraController controller,
+  ) async {
+    _stabilizationPending = false;
+    final enabled = _videoStabilizationEnabled;
+    final applied = await _applyVideoStabilization(
+      controller,
+      enabled: enabled,
+    );
+    _appliedProfile = _appliedProfile?.copyWith(
+      stabilizationEnabled: enabled && applied,
+    );
+    return applied;
+  }
+
+  /// Applies a stabilization change deferred during the recording that just
+  /// stopped. Must run inside the operation queue.
+  Future<void> _applyPendingStabilization(CameraController controller) async {
+    if (!_stabilizationPending || !identical(controller, _controller)) return;
+    if (!controller.value.isInitialized || controller.value.isRecordingVideo) {
+      return;
+    }
+    await _applyStabilizationToLiveController(controller);
   }
 
   Future<bool> _applyVideoStabilization(
@@ -755,35 +884,74 @@ class CameraService {
   }
 
   /// Stops recording and returns the temporary file; saving to the gallery is the caller's responsibility.
+  ///
+  /// A stop the platform rejects (for example a recording finalized without a
+  /// usable file) is rethrown, and the service no longer reports an active
+  /// recording afterwards, so the camera can record or switch again.
   Future<XFile?> stopRecording() async {
     if (_disposeRequested) return null;
     return _enqueue(() async {
       final controller = _controller;
       if (controller == null || !controller.value.isRecordingVideo) return null;
-      return _gateway.stop(controller);
+      final file = await _stopInQueue(controller);
+      await _applyPendingStabilization(controller);
+      return file;
     });
   }
 
+  /// Stops the controller's recording, reconciling its state when the stop
+  /// fails. Must run inside the operation queue.
+  ///
+  /// `CameraController.stopVideoRecording` clears `isRecordingVideo` only
+  /// after a successful platform reply. Every backend has already ended the
+  /// native recording when it reports a stop failure (a finalize error, a
+  /// writer that could not finish), so leaving the flag set would make the
+  /// service refuse to record, switch cameras or change the profile until the
+  /// camera is released. The controller is reconciled before the failure is
+  /// propagated.
+  Future<XFile> _stopInQueue(CameraController controller) async {
+    try {
+      return await _gateway.stop(controller);
+    } on CameraException {
+      if (controller.value.isRecordingVideo) {
+        controller.value = controller.value.copyWith(
+          isRecordingVideo: false,
+          isRecordingPaused: false,
+        );
+      }
+      rethrow;
+    }
+  }
+
   /// Finalize once, then inspect the original file without risking its ownership.
-  Future<RecordingResult?> finishRecording() {
-    return _enqueue(() async {
+  ///
+  /// Only the stop is serialized with other camera operations. Inspection
+  /// (up to 10 seconds) runs outside the queue and reads the finalized file,
+  /// never the controller, so a following `release()` or `dispose()` (for
+  /// example when the app moves to background) is not held behind it and
+  /// finds no active recording to stop again.
+  Future<RecordingResult?> finishRecording() async {
+    final stopped = await _enqueue(() async {
       final controller = _controller;
       if (controller == null || !controller.value.isRecordingVideo) return null;
       final capture = _captureProfile;
-      final file = await _gateway.stop(controller);
-      RecordedMediaMetadata? metadata;
-      try {
-        metadata = await _gateway
-            .inspect(file.path)
-            .timeout(const Duration(seconds: 10));
-      } catch (_) {
-        /* The valid original remains available for Save/Discard. */
-      }
-      return RecordingResult(
-        file: file,
-        mediaMetadata: _withCaptureContext(metadata, capture),
-      );
+      final file = await _stopInQueue(controller);
+      await _applyPendingStabilization(controller);
+      return (file: file, capture: capture);
     });
+    if (stopped == null) return null;
+    RecordedMediaMetadata? metadata;
+    try {
+      metadata = await _gateway
+          .inspect(stopped.file.path)
+          .timeout(const Duration(seconds: 10));
+    } catch (_) {
+      /* The valid original remains available for Save/Discard. */
+    }
+    return RecordingResult(
+      file: stopped.file,
+      mediaMetadata: _withCaptureContext(metadata, stopped.capture),
+    );
   }
 
   static RecordedMediaMetadata? _withCaptureContext(
@@ -791,17 +959,33 @@ class CameraService {
     AppliedRecordingProfile? capture,
   ) {
     if (capture == null) return metadata;
+    // A configuration-time reason explains the output better than the
+    // resulting mismatch, so it is never replaced by encodedMismatch.
+    final fallbackReason =
+        capture.fallbackReason ??
+        (_outputDiffers(metadata, capture.format)
+            ? RecordingFallbackReason.encodedMismatch
+            : null);
     return (metadata ?? const RecordedMediaMetadata()).copyWith(
       cameraName: capture.cameraName,
       lensDirection: capture.lensDirection,
       configuredWidth: capture.format.width,
       configuredHeight: capture.format.height,
       configuredFps: capture.format.fps,
-      fallbackReason: _outputDiffers(metadata, capture.format)
-          ? 'encodedMismatch'
-          : capture.fallbackReason,
+      fallbackReason: fallbackReason,
     );
   }
+
+  /// Relative tolerance for a `measured` frame rate.
+  ///
+  /// A measured rate is frames divided by duration, so it includes start/stop
+  /// edge frames, dropped frames under thermal load, and longer exposures in
+  /// low light; 28-29 fps is normal for an exact 30 fps configuration. A real
+  /// configuration mismatch is a different capture mode (30 vs 60, or 24/25
+  /// vs 30), which is at least a 16% difference, so 10% ignores cadence
+  /// jitter while still flagging a wrong mode. `nominal` rates come from the
+  /// container header and keep the strict one-frame tolerance.
+  static const double _measuredFpsTolerance = 0.1;
 
   static bool _outputDiffers(
     RecordedMediaMetadata? metadata,
@@ -816,7 +1000,11 @@ class CameraService {
       return true;
     }
     final fps = metadata?.fps;
-    return fps != null && (fps - format.fps).abs() > 1;
+    if (fps == null) return false;
+    final tolerance = metadata?.fpsSource == 'measured'
+        ? format.fps * _measuredFpsTolerance
+        : 1.0;
+    return (fps - format.fps).abs() > tolerance;
   }
 
   /// Releases the controller when the app enters background; the service can be
@@ -836,12 +1024,13 @@ class CameraService {
   Future<RecordingResult?> _releaseCurrentController() async {
     final controller = _controller;
     _controller = null;
+    _resetControllerState();
     if (controller == null) return null;
     RecordingResult? interrupted;
     if (controller.value.isRecordingVideo) {
       final capture = _captureProfile;
       try {
-        final file = await _gateway.stop(controller);
+        final file = await _stopInQueue(controller);
         interrupted = RecordingResult(
           file: file,
           mediaMetadata: _withCaptureContext(null, capture),

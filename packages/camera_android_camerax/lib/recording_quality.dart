@@ -1,6 +1,6 @@
-// Copyright 2013 The Flutter Authors
-// Use of this source code is governed by a BSD-style license that can be
-// found in the LICENSE file.
+// Copyright 2026 Camera Recording Kit contributors
+// Use of this source code is governed by the MIT license that can be
+// found in the LICENSE file at the root of this repository.
 
 import 'package:flutter/services.dart';
 
@@ -13,10 +13,13 @@ const MethodChannel _recordingQualityChannel = MethodChannel(
 ///
 /// Each profile contains integer `width`, `height`, and `fps` values plus a
 /// `codecs` list. CameraX does not currently expose codec selection, so the
-/// Android backend advertises only `h264`. Only
-/// 30 or 60 FPS combinations validated against CameraX, a containing camera
-/// frame-rate range, per-size sensor duration, and encoder constraints are
-/// returned.
+/// Android backend advertises only `h264`. Only 30 or 60 FPS combinations
+/// validated against CameraX recording qualities, a fixed `[fps, fps]` camera
+/// frame-rate range (the range the readback of [recordingQualityApplied]
+/// requires), per-size sensor duration, an H.264 CameraX encoder profile, and
+/// the size/rate limits of an installed hardware H.264 encoder are returned.
+/// Software encoders are only considered on devices without a hardware H.264
+/// encoder.
 Future<Map<String, dynamic>> recordingQualityCapabilities(String cameraName) {
   return _invokeMap('recordingQualityCapabilities', <String, Object?>{
     'cameraName': cameraName,
@@ -41,10 +44,13 @@ Future<void> setRecordingVideoCodec(String codec) async {
 
 /// Returns the profile currently applied to the bound recording use case.
 ///
-/// The map contains integer `width` and `height`, nullable numeric `fps`, and
-/// nullable boolean `stabilizationEnabled` values. Because CameraX does not
-/// expose the selected encoder codec before recording, `codec` is null and
-/// `codecSource` is `unavailableUntilFinalized`. The authoritative codec of a
+/// The map contains integer `width` and `height` from the bound `VideoCapture`,
+/// integer `fps` from the fixed AE target frame-rate range and boolean
+/// `stabilizationEnabled` from the video stabilization mode of the camera's
+/// latest `CaptureResult`, so both report what the camera applied rather than
+/// what was requested. Because CameraX does not expose the selected encoder
+/// codec before recording, `codec` is null and `codecSource` is
+/// `unavailableUntilFinalized`. The authoritative codec of a
 /// finalized file is returned by [inspectRecordingMedia]. A profile that CameraX did
 /// not finish binding is reported as a [PlatformException] with code
 /// `unsupportedRecordingProfile`.
@@ -56,6 +62,10 @@ Future<Map<String, dynamic>> recordingQualityApplied(int cameraId) {
 
 /// Reads the finalized MP4 container metadata at [path] without decoding video
 /// frames.
+///
+/// `mimeType` is the container type (for example `video/mp4`), as on iOS and
+/// macOS, and `codec` describes the video track (for example `avc1.640028` or
+/// `avc`); it is null when the file has no video track.
 Future<Map<String, dynamic>> inspectRecordingMedia(String path) {
   return _invokeMap('inspectRecordingMedia', <String, Object?>{'path': path});
 }

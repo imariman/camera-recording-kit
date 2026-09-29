@@ -81,7 +81,14 @@ public final class MacOSVideoStabilizer {
 
     private static let analysisMaximumDimension = 640
     private static let analysisFrameInterval = 2
-    private static let maximumOutputBuffers = 3
+    /// Output buffers that may be alive at once. Downstream holds several
+    /// concurrently: the session's latest frame, the preview texture,
+    /// Flutter's previously displayed frame and a few frames queued in the
+    /// encoder. An exhausted pool makes a frame fall back to the uncropped
+    /// source, which shows up as zoom flicker in the recording.
+    static let maximumOutputBuffers = 8
+    /// The analysis pool only backs the current and the reference frame.
+    private static let maximumAnalysisBuffers = 3
 
     private let ciContext: CIContext
     private let motionFilter = MacOSVideoStabilizationMotionFilter()
@@ -349,7 +356,10 @@ public final class MacOSVideoStabilizer {
 
     private func makeAnalysisBuffer(from sourceBuffer: CVPixelBuffer) -> CVPixelBuffer? {
         guard let analysisPool,
-              let analysisBuffer = Self.makeBuffer(from: analysisPool) else {
+              let analysisBuffer = Self.makeBuffer(
+                  from: analysisPool,
+                  allocationThreshold: Self.maximumAnalysisBuffers
+              ) else {
             return nil
         }
         let destinationExtent = CGRect(
@@ -392,7 +402,10 @@ public final class MacOSVideoStabilizer {
         correction: CGPoint
     ) -> CVPixelBuffer? {
         guard let outputPool,
-              let outputBuffer = Self.makeBuffer(from: outputPool) else {
+              let outputBuffer = Self.makeBuffer(
+                  from: outputPool,
+                  allocationThreshold: Self.maximumOutputBuffers
+              ) else {
             return nil
         }
         let width = CGFloat(CVPixelBufferGetWidth(sourceBuffer))
@@ -506,9 +519,12 @@ public final class MacOSVideoStabilizer {
         return pool
     }
 
-    private static func makeBuffer(from pool: CVPixelBufferPool) -> CVPixelBuffer? {
+    private static func makeBuffer(
+        from pool: CVPixelBufferPool,
+        allocationThreshold: Int
+    ) -> CVPixelBuffer? {
         let auxAttributes: [CFString: Any] = [
-            kCVPixelBufferPoolAllocationThresholdKey: maximumOutputBuffers,
+            kCVPixelBufferPoolAllocationThresholdKey: allocationThreshold,
         ]
         var buffer: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBufferWithAuxAttributes(

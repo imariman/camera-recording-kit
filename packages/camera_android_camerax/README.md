@@ -3,18 +3,37 @@
 The Android implementation of [`camera`][1] built with the [CameraX library][2].
 
 *Note*: If any of [the limitations](#limitations) prevent you from using
-using `camera_android_camerax` or if you run into any problems, please report
-these issues under [`flutter/flutter`][5] with `[camerax]` in the title.
+`camera_android_camerax` or if you run into any problems, please report
+fork-specific issues in the
+[Camera Recording Kit issue tracker](https://github.com/imariman/camera-recording-kit/issues)
+and upstream CameraX plugin issues under [`flutter/flutter`][5] with `[camerax]`
+in the title.
 You may also opt back into the [`camera_android`][9] implementation if you need.
 
 ## Usage
 
-As of `camera: ^0.11.0`, this package is [endorsed][3], which means you can
-simply use `camera` normally. This package will be automatically be included
-in your app when you do, so you do not need to add it to your `pubspec.yaml`.
+This is the Camera Recording Kit fork of the package. It is consumed from Git
+and is not published on pub.dev. Upstream `camera_android_camerax` is
+[endorsed][3] by `camera`, so `camera` alone resolves the hosted upstream
+package, which lacks this fork's recording quality extension. Applications
+must add a `dependency_overrides` entry that points `camera_android_camerax`
+at this repository, pinned to the same commit as the kit's other packages:
 
-However, if you `import` this package to use any of its APIs directly, you
-should add it to your `pubspec.yaml` as usual.
+```yaml
+dependency_overrides:
+  camera_android_camerax:
+    git:
+      url: https://github.com/imariman/camera-recording-kit.git
+      path: packages/camera_android_camerax
+      ref: SAME_COMMIT
+```
+
+See the [repository README](../../README.md#use-from-git) for the complete
+`pubspec.yaml` setup. This fork requires Flutter 3.44 or newer (Dart 3.12).
+
+If you `import` this package to use its APIs directly, such as
+`recording_quality.dart`, also list it under `dependencies` with the same Git
+source.
 
 ### Recording quality extension
 
@@ -22,10 +41,14 @@ Import `package:camera_android_camerax/recording_quality.dart` to query the
 Android recording backend directly:
 
 * `recordingQualityCapabilities(cameraName)` returns only 30/60 FPS SDR
-  combinations verified against CameraX recording qualities, a containing
-  camera frame-rate range, per-size sensor duration, CameraX encoder profiles,
-  and installed encoder size/rate constraints. It also reports native
-  focus-lock and exposure-lock support for that camera name.
+  combinations verified against CameraX recording qualities, a fixed
+  `[fps, fps]` camera frame-rate range (the same range the preview requests and
+  `recordingQualityApplied` requires; a variable range such as `[15, 60]` is not
+  enough), per-size sensor duration, an H.264 CameraX encoder profile, and the
+  size/rate limits of an installed hardware H.264 encoder (software encoders
+  count only on devices without one). Capabilities are built off the main
+  thread. It also reports native focus-lock and exposure-lock support for that
+  camera name.
 * `recordingQualityApplied(cameraId)` reads the resolution from the bound
   `VideoCapture`, and the frame rate and stabilization state from the latest
   Camera2 `CaptureResult` (`CONTROL_AE_TARGET_FPS_RANGE` and
@@ -39,17 +62,23 @@ Android recording backend directly:
   converge. It does not submit a new metering request or lock focus; callers
   may apply their requested lock only after convergence succeeds.
 * `inspectRecordingMedia(path)` reads finalized MP4 container and track
-  metadata without decoding video frames.
+  metadata without decoding video frames. `mimeType` is the container type
+  (`video/mp4`), as on iOS and macOS; `codec` comes from the video track.
 
 Each exact format advertises its codec support. CameraX advertises H.264 only
 because its public Recorder API cannot deterministically select HEVC;
 `setRecordingVideoCodec('hevc')` therefore reports `unsupportedVideoCodec`.
 
-Initialization binds `Preview` and `VideoCapture` together. Still capture and
-image analysis remain available and are bound lazily when requested. Recording
+Initialization binds `Preview` and `VideoCapture` together, and both stay bound
+after a recording stops, so the next recording starts without reconfiguring the
+camera session and the readback above keeps working between recordings. Still
+capture and image analysis remain available and are bound lazily when requested. Recording
 quality selection uses an exact CameraX `QualitySelector`; callers should retry
 their own approved lower profile after `unsupportedRecordingProfile` instead of
-assuming a fallback was applied.
+assuming a fallback was applied. Binding reports `unsupportedRecordingProfile`
+only when CameraX rejects the use-case configuration (surface combination,
+resolution, quality or frame rate); other failures, such as a camera that is no
+longer available, are reported as errors.
 
 ## Limitations
 
@@ -70,9 +99,10 @@ and thus that parameter will silently be ignored.
 
 ### Writing to external storage to save image files
 
-In order to save captured images and videos to files on Android 10 and below, CameraX
+In order to save captured images and videos to files on older Android versions, CameraX
 requires specifying the `WRITE_EXTERNAL_STORAGE` permission (see [the CameraX documentation][10]).
-This is already done in the plugin, so no further action is required on your end.
+The plugin already declares it for Android 9 (API level 28) and below
+(`android:maxSdkVersion="28"`), so no further action is required on your end.
 
 To understand the privacy impact of specifying the `WRITE_EXTERNAL_STORAGE` permission, see the
 [`WRITE_EXTERNAL_STORAGE` documentation][11]. We have seen apps also have the [`READ_EXTERNAL_STORAGE`][13]

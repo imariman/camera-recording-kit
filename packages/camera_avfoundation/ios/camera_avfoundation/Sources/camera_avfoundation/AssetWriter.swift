@@ -13,6 +13,7 @@ protocol AssetWriter: NSObjectProtocol {
 
   func startWriting() -> Bool
   func finishWriting(completionHandler handler: @escaping @Sendable () -> Void)
+  func cancelWriting()
   func startSession(atSourceTime startTime: CMTime)
   func add(_ input: AVAssetWriterInput)
   func canApply(outputSettings: [String: Any]?, forMediaType mediaType: AVMediaType) -> Bool

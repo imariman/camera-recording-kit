@@ -2,8 +2,9 @@ import 'package:flutter/foundation.dart';
 
 /// Represents the user's preferred recording-quality intent.
 ///
-/// These values do not guarantee a resolution, frame rate, or codec. The camera
-/// layer selects an appropriate platform setting for this intent.
+/// These values do not guarantee a resolution, frame rate, or codec. They are
+/// used only by backends without quality selection; see
+/// [RecordingProfile.quality].
 enum RecordingQualityIntent { automatic, high, balanced, compact }
 
 /// Explicit recording targets; Automatic is resolved independently per lens.
@@ -39,6 +40,16 @@ class RecordingProfile {
 
   /// Whether the camera controller records audio with the video stream.
   final bool recordAudio;
+
+  /// Coarse quality intent for backends without quality selection.
+  ///
+  /// It is used only when `CameraService.supportsQualitySelection` is false
+  /// (a custom `controllerFactory` or an unsupported host such as Windows or
+  /// Linux), where it maps to a `ResolutionPreset` through
+  /// `CameraService.resolutionPresetFor`. On the Android, iOS, and macOS
+  /// quality backends [resolution], [fps], [bitratePreset], and [videoCodec]
+  /// select the format and this value has no effect; changing only [quality]
+  /// there updates the remembered profile without restarting the camera.
   final RecordingQualityIntent quality;
   final RecordingResolution resolution;
   final int fps;

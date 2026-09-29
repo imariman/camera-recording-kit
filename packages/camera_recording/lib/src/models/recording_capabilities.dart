@@ -2,6 +2,30 @@ import 'package:flutter/foundation.dart';
 
 import 'package:camera_recording/src/models/recording_profile.dart';
 
+/// Values reported in [AppliedRecordingProfile.fallbackReason] and
+/// `RecordedMediaMetadata.fallbackReason`. A null reason means the requested
+/// profile was applied exactly.
+abstract final class RecordingFallbackReason {
+  /// The best candidate for the request was rejected by the camera
+  /// configuration, and a later candidate was applied instead.
+  static const configurationRejected = 'configurationRejected';
+
+  /// The lens does not offer the requested resolution, frame rate, or codec,
+  /// so the closest supported format was applied instead. This includes a
+  /// lens whose smallest format is larger than an explicit target.
+  static const unsupportedProfile = 'unsupportedProfile';
+
+  /// The finalized file's dimensions or frame rate differ from the configured
+  /// format although configuration itself was exact.
+  static const encodedMismatch = 'encodedMismatch';
+}
+
+/// One capture mode: dimensions, frame rate, and the codecs available for it.
+///
+/// Equality and [hashCode] identify the capture mode only (orientation-agnostic
+/// dimensions and frame rate). [codecs] is deliberately excluded so a format
+/// advertised with several codecs still matches the single-codec format read
+/// back from the active camera; compare [codecs] explicitly when it matters.
 @immutable
 class RecordingVideoFormat {
   const RecordingVideoFormat({
@@ -77,6 +101,11 @@ class RecordingVideoFormat {
       fps == other.fps;
   @override
   int get hashCode => Object.hash(longSide, shortSide, fps);
+
+  @override
+  String toString() =>
+      'RecordingVideoFormat(${width}x$height@$fps, '
+      '${codecs.map((codec) => codec.name).join('/')})';
 }
 
 @immutable
@@ -142,16 +171,48 @@ class RecordingCapabilities {
         ...format.codecs,
   };
 
-  /// Resolution first, then FPS, then the requested codec. Never upgrades an
-  /// explicit target. HEVC requests retain an H.264 attempt for the same exact
-  /// format before falling back to a lower resolution or frame rate.
+  /// Candidate formats for [request], best first.
+  ///
+  /// An explicit resolution is resolution-first, then FPS, then the requested
+  /// codec. For [RecordingResolution.automatic] there is no resolution to
+  /// honor, so formats at the requested frame rate come first (1080p60 beats
+  /// 2160p30 for `fps: 60`), matching what [frameRates] offers for automatic.
+  /// Ties with the same short side and frame rate prefer the wider format.
+  ///
+  /// An explicit target is never upgraded while the lens has a format at or
+  /// below it. When it has none (for example a remembered 480p profile on a
+  /// lens whose smallest format is 720p), the formats at the closest larger
+  /// resolution are returned instead, so that switching to such a lens does
+  /// not fail. `CameraService` reports that result as
+  /// [RecordingFallbackReason.unsupportedProfile].
+  ///
+  /// HEVC requests retain an H.264 attempt for the same exact format before
+  /// falling back to a lower resolution or frame rate.
   List<RecordingVideoFormat> candidates(RecordingProfile request) {
-    final formats = <RecordingVideoFormat>[];
-    for (final format in profiles) {
-      if (format.shortSide > request.resolution.height ||
-          (format.fps != request.fps && format.fps != 30)) {
-        continue;
+    bool frameRateAllowed(RecordingVideoFormat format) =>
+        format.fps == request.fps || format.fps == 30;
+    final target = request.resolution.height;
+    var pool = [
+      for (final format in profiles)
+        if (frameRateAllowed(format) && format.shortSide <= target) format,
+    ];
+    if (pool.isEmpty && request.resolution != RecordingResolution.automatic) {
+      final larger = [
+        for (final format in profiles)
+          if (frameRateAllowed(format) && format.shortSide > target) format,
+      ];
+      if (larger.isNotEmpty) {
+        final closest = larger
+            .map((format) => format.shortSide)
+            .reduce((a, b) => a < b ? a : b);
+        pool = [
+          for (final format in larger)
+            if (format.shortSide == closest) format,
+        ];
       }
+    }
+    final formats = <RecordingVideoFormat>[];
+    for (final format in pool) {
       if (format.supportsCodec(request.videoCodec)) {
         formats.add(
           RecordingVideoFormat(
@@ -173,11 +234,20 @@ class RecordingCapabilities {
         );
       }
     }
+    final automatic = request.resolution == RecordingResolution.automatic;
     formats.sort((a, b) {
+      if (automatic) {
+        final aMatches = a.fps == request.fps ? 1 : 0;
+        final bMatches = b.fps == request.fps ? 1 : 0;
+        final requestedRate = bMatches.compareTo(aMatches);
+        if (requestedRate != 0) return requestedRate;
+      }
       final resolution = b.shortSide.compareTo(a.shortSide);
       if (resolution != 0) return resolution;
       final frameRate = b.fps.compareTo(a.fps);
       if (frameRate != 0) return frameRate;
+      final width = b.longSide.compareTo(a.longSide);
+      if (width != 0) return width;
       final aPreferred = a.supportsCodec(request.videoCodec) ? 1 : 0;
       final bPreferred = b.supportsCodec(request.videoCodec) ? 1 : 0;
       return bPreferred.compareTo(aPreferred);
@@ -186,6 +256,7 @@ class RecordingCapabilities {
   }
 }
 
+/// The profile verified by native readback on the active camera.
 @immutable
 class AppliedRecordingProfile {
   const AppliedRecordingProfile({
@@ -200,6 +271,25 @@ class AppliedRecordingProfile {
   final RecordingVideoFormat format;
   final String cameraName;
   final String lensDirection;
+
+  /// Null when [format] matches the request exactly; otherwise one of the
+  /// [RecordingFallbackReason] values. An automatic resolution is satisfied by
+  /// the best format of the lens, whatever its size, so a sub-HD result for
+  /// automatic is not a fallback by itself.
   final String? fallbackReason;
+
+  /// True only when native readback confirmed active stabilization.
   final bool stabilizationEnabled;
+
+  AppliedRecordingProfile copyWith({
+    RecordingProfile? requested,
+    bool? stabilizationEnabled,
+  }) => AppliedRecordingProfile(
+    requested: requested ?? this.requested,
+    format: format,
+    cameraName: cameraName,
+    lensDirection: lensDirection,
+    fallbackReason: fallbackReason,
+    stabilizationEnabled: stabilizationEnabled ?? this.stabilizationEnabled,
+  );
 }

@@ -3,12 +3,12 @@
 <p align="center">
 <a href="https://flutter.dev"><img src="https://img.shields.io/badge/Platform-Flutter-02569B?logo=flutter" alt="Platform"></a>
 <a href="https://dart.dev"><img src="https://img.shields.io/badge/language-Dart-blue" alt="Language: Dart"></a>
-<br>
-<a href="https://pub.dev/packages/camera_desktop"><img src="https://img.shields.io/pub/v/camera_desktop?label=pub.dev&labelColor=333940&logo=dart" alt="Pub Version"></a>
-<a href="https://pub.dev/packages/camera_desktop/score"><img src="https://img.shields.io/pub/points/camera_desktop?color=2E8B57&label=pub%20points" alt="pub points"></a>
-<a href="https://github.com/hugocornellier/camera_desktop/actions/workflows/ci.yml"><img src="https://github.com/hugocornellier/camera_desktop/actions/workflows/ci.yml/badge.svg" alt="Flutter CI"></a>
-<a href="https://github.com/hugocornellier/camera_desktop/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-007A88.svg" alt="License"></a>
+<a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-007A88.svg" alt="License"></a>
 </p>
+
+This is the Camera Recording Kit fork of
+[hugocornellier/camera_desktop](https://github.com/hugocornellier/camera_desktop).
+It is consumed from Git and is not published on pub.dev.
 
 A Flutter camera plugin for desktop platforms. Implements
 [`camera_platform_interface`](https://pub.dev/packages/camera_platform_interface)
@@ -25,15 +25,38 @@ so it works seamlessly with the standard
 
 ## Installation
 
-Add `camera_desktop` alongside `camera` in your `pubspec.yaml`:
+Use this package from Git together with the rest of Camera Recording Kit, as
+described in the [repository README](../../README.md#use-from-git). The
+`camera_desktop` package on pub.dev is the upstream plugin without this fork's
+`recording_quality.dart` extension, so do not add it from pub.dev.
+
+`camera` does not endorse a desktop implementation. With the kit,
+`camera_desktop` reaches your application through `camera_recording`, and the
+`dependency_overrides` entry pins it to the same commit as the other packages:
 
 ```yaml
 dependencies:
-  camera: ^0.11.0
-  camera_desktop: ^1.2.1
+  camera: ^0.12.0+2
+  camera_recording:
+    git:
+      url: https://github.com/imariman/camera-recording-kit.git
+      path: packages/camera_recording
+      ref: SAME_COMMIT
+
+dependency_overrides:
+  # camera_android_camerax and camera_avfoundation entries as in the
+  # repository README.
+  camera_desktop:
+    git:
+      url: https://github.com/imariman/camera-recording-kit.git
+      path: packages/camera_desktop
+      ref: SAME_COMMIT
 ```
 
-That's it. All three desktop platforms are covered, no additional packages needed.
+To use `camera_desktop` without `camera_recording`, list it under
+`dependencies` with the same Git source instead. The kit requires Flutter 3.44
+or newer (Dart 3.12). All three desktop platforms are covered by this one
+package.
 
 ## Usage
 
@@ -138,10 +161,12 @@ No profile above 4K is advertised or selected.
 480p, 720p, 1080p, and 2160p formats. An explicit FPS must be 30 or 60. If the
 camera and encoder cannot apply that exact pair, initialization fails with
 `unsupportedRecordingProfile`; AVFoundation is not allowed to silently choose
-a different format. Initialization also verifies the first capture sample's
+a different format. Camera modes reported within 0.1 FPS of the request (for
+example 29.97 or 59.94 on UVC cameras) count as that rate. Initialization also verifies the first capture sample's
 dimensions before reporting the camera ready. When audio is enabled, missing
 microphone permission or capture support fails initialization rather than
-creating a silent recording.
+creating a silent recording. The system default input selected in System
+Settings (for example AirPods or a USB microphone) is preferred.
 
 `recordingQualityApplied` reports first-sample dimensions and the configured
 active-format dimensions/frame duration. Final MP4 inspection reports track
@@ -159,6 +184,15 @@ macOS recording pause/resume removes paused time from both audio and video
 using the capture session clock, preserving one synchronized MP4. Stopping
 while paused finalizes that file. Other desktop platforms retain their existing
 unsupported pause behavior.
+
+macOS writes fragmented MP4 (one-second fragments), so an interrupted
+recording stays readable up to its last fragment. Runtime problems reach Dart
+as `cameraError` events (`CameraController.value.errorDescription`): session
+errors and interruptions, a writer failure during recording (reported once;
+`stopVideoRecording` then returns the partial file if it is still readable),
+and a camera disconnect. A disconnect during recording finalizes the file, and
+the next `stopVideoRecording` returns it. On app quit an active recording is
+finalized for up to five seconds before the app exits.
 
 `getSupportedVideoStabilizationModes` exposes `off` and, at up to 1080p30,
 `level1`. On macOS, level 1 is software translation correction using Vision and
@@ -185,7 +219,7 @@ No additional setup required.
 | Live preview | Yes | Yes | Yes |
 | Photo capture | Yes | Yes | Yes |
 | Video recording | Yes | Yes | Yes |
-| Image streaming | Yes | Yes | No |
+| Image streaming | Yes | Yes | Yes |
 | Audio recording | Yes | Yes | Yes |
 | Recording pause/resume | No | Yes | No |
 | Software stabilization | No | Up to 1080p30 | No |
@@ -210,8 +244,8 @@ await plugin.setMirror(cameraId, false); // disable mirror
 await plugin.setMirror(cameraId, true);  // re-enable mirror
 ```
 
-On **Windows**, the native backend does not mirror, so the example app wraps the
-preview in a horizontal `Transform` in Flutter:
+On **Windows**, the native backend does not mirror. For a mirror-style preview,
+wrap the preview in a horizontal `Transform` in Flutter:
 
 ```dart
 if (Platform.isWindows) {

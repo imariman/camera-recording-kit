@@ -1,4 +1,6 @@
-// Copyright 2026 Teleprompter Studio. All rights reserved.
+// Copyright 2026 Camera Recording Kit contributors
+// Use of this source code is governed by the MIT license that can be
+// found in the LICENSE file at the root of this repository.
 
 import AVFoundation
 import XCTest
@@ -47,6 +49,32 @@ final class RecordingQualityTests: XCTestCase {
                 RecordingQuality.supportsEncoding(profile: profile, codec: $0)
             }
         )
+    }
+
+    func testFrameRateSupportToleratesRoundedUvcRates() {
+        // 29.97 and 30.00003 FPS modes are the 30 FPS profile.
+        XCTAssertTrue(RecordingQuality.supports(frameRate: 30, minFrameRate: 29.97, maxFrameRate: 29.97))
+        XCTAssertTrue(RecordingQuality.supports(frameRate: 30, minFrameRate: 30.00003, maxFrameRate: 30.00003))
+        XCTAssertTrue(RecordingQuality.supports(frameRate: 60, minFrameRate: 1, maxFrameRate: 59.94))
+        XCTAssertTrue(RecordingQuality.supports(frameRate: 30, minFrameRate: 5, maxFrameRate: 60))
+        XCTAssertFalse(RecordingQuality.supports(frameRate: 30, minFrameRate: 25, maxFrameRate: 29.5))
+        XCTAssertFalse(RecordingQuality.supports(frameRate: 60, minFrameRate: 1, maxFrameRate: 30))
+        XCTAssertTrue(RecordingQuality.matches(frameRate: 29.97, requested: 30))
+        XCTAssertTrue(RecordingQuality.matches(frameRate: 60.0001, requested: 60))
+        XCTAssertFalse(RecordingQuality.matches(frameRate: 25, requested: 30))
+    }
+
+    func testFrameDurationIsClampedIntoTheSupportedRange() {
+        let requested = CMTime(value: 1, timescale: 30)
+        let ntsc = CMTime(value: 1001, timescale: 30000)
+        // A 29.97-only range rejects exactly 1/30 s; the bound is applied instead.
+        XCTAssertEqual(RecordingQuality.clamp(requested, minimum: ntsc, maximum: ntsc), ntsc)
+        XCTAssertEqual(
+            RecordingQuality.clamp(requested, minimum: CMTime(value: 1, timescale: 60), maximum: CMTime(value: 1, timescale: 5)),
+            requested
+        )
+        let fast = CMTime(value: 1, timescale: 31)
+        XCTAssertEqual(RecordingQuality.clamp(requested, minimum: CMTime(value: 1, timescale: 60), maximum: fast), fast)
     }
 
     func testVideoCodecNamesMatchTheDartChannelContract() {

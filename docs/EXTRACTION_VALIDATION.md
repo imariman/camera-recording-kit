@@ -10,7 +10,10 @@ production sources and the three original license files are byte-identical to
 the source snapshot; changes to forks are package metadata, analyzer setup and
 standalone test maintenance.
 
-| Check | Result |
+The table records the results at extraction time. Current coverage is listed
+under [Current automated coverage](#current-automated-coverage).
+
+| Check | Result at extraction |
 | --- | --- |
 | Shared `camera_recording` Dart suite | 43 passed |
 | Android CameraX Dart suite | 131 passed |
@@ -38,3 +41,25 @@ No physical camera, microphone, long-recording or unplug/reconnect acceptance
 was performed. Synthetic media tests verify timing and processing behavior,
 not image quality on actual hardware. Android JVM and iOS native SDK validation
 from PR #24 were not rerun for this source-preserving extraction.
+
+## Current automated coverage
+
+Since #18 the Android JVM (Robolectric/Mockito) suite runs in CI through
+`tool/test_android_jvm.sh`, and the macOS native suite has grown since the
+extraction. The `Validate` workflow run for the v0.2.0 tag
+([36488486849](https://github.com/imariman/camera-recording-kit/actions/runs/36488486849),
+Flutter 3.47.2) reported:
+
+| Check | Result |
+| --- | --- |
+| Shared `camera_recording` Dart suite | 63 passed |
+| Android CameraX Dart suite | 135 passed |
+| Android CameraX JVM unit tests (`android-jvm` job) | 208 passed |
+| iOS AVFoundation Dart suite | 69 passed |
+| Desktop Dart suite | 33 passed |
+| macOS native synthetic media XCTest suite | 21 passed |
+| Flutter analysis of each package | No issues |
+
+The device-free iOS XCTests of `camera_avfoundation` added with the #22-#36
+bug-scan fixes run in the `ios-native-simulator` job through
+`tool/test_ios_camera_native.py`.

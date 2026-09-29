@@ -5,6 +5,7 @@
 package io.flutter.plugins.camerax;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.mock;
@@ -26,6 +27,7 @@ import androidx.camera.core.resolutionselector.ResolutionSelector;
 import androidx.core.util.Consumer;
 import io.flutter.view.TextureRegistry;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
@@ -187,8 +189,10 @@ public class PreviewTest {
     previewSurfaceProvider.onSurfaceRequested(mockSurfaceRequest);
 
     verify(mockSurfaceProducer).setSize(resolutionWidth, resolutionHeight);
+    final ArgumentCaptor<Executor> executorCaptor = ArgumentCaptor.forClass(Executor.class);
     verify(mockSurfaceRequest)
-        .provideSurface(surfaceCaptor.capture(), any(Executor.class), consumerCaptor.capture());
+        .provideSurface(
+            surfaceCaptor.capture(), executorCaptor.capture(), consumerCaptor.capture());
 
     // Test that the surface derived from the surface texture entry will be provided to the surface
     // request.
@@ -205,6 +209,8 @@ public class PreviewTest {
     capturedConsumer.accept(mockSurfaceRequestResult);
     verify(mockSurface).release();
     reset(mockSurface);
+    // The per-request result executor is shut down once its single result was handled.
+    assertTrue(((ExecutorService) executorCaptor.getValue()).isShutdown());
 
     when(mockSurfaceRequestResult.getResultCode())
         .thenReturn(SurfaceRequest.Result.RESULT_REQUEST_CANCELLED);

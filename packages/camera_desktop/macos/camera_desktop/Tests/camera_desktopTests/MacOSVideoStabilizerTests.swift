@@ -248,6 +248,42 @@ final class MacOSVideoStabilizerTests: XCTestCase {
         XCTAssertTrue(stabilizer.analysisPool === analysisPool)
     }
 
+    func testHeldOutputBuffersDoNotFallBackToRawFrames() throws {
+        let width = 320
+        let height = 240
+        let stabilizer = MacOSVideoStabilizer()
+        XCTAssertEqual(
+            stabilizer.configure(width: width, height: height, framesPerSecond: 30),
+            .available
+        )
+        // Downstream consumers keep several output frames alive at once: the
+        // session's latest frame, the preview texture, Flutter's previous
+        // frame and frames queued in the encoder.
+        let heldFrameCount = 6
+        XCTAssertLessThan(heldFrameCount, MacOSVideoStabilizer.maximumOutputBuffers)
+        var held: [CMSampleBuffer] = []
+        for index in 0..<24 {
+            let sample = try makeTexturedSampleBuffer(
+                width: width,
+                height: height,
+                translation: .zero,
+                presentationTimeStamp: CMTime(value: Int64(index * 20), timescale: 600)
+            )
+            let result = stabilizer.process(sampleBuffer: sample)
+            XCTAssertTrue(
+                result.isStabilized,
+                "Frame \(index) fell back to the raw frame: \(result.fallbackReason ?? "no reason")"
+            )
+            XCTAssertFalse(
+                CMSampleBufferGetImageBuffer(result.sampleBuffer)! === CMSampleBufferGetImageBuffer(sample)!,
+                "Frame \(index) returned the uncropped source buffer."
+            )
+            held.append(result.sampleBuffer)
+            if held.count > heldFrameCount { held.removeFirst() }
+        }
+        XCTAssertEqual(held.count, heldFrameCount)
+    }
+
     private func meanSquaredAdjacentDifference(_ values: [CGFloat]) -> CGFloat {
         let differences = zip(values.dropFirst(), values).map { current, previous in
             let difference = current - previous

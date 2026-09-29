@@ -17,9 +17,13 @@ finalized file. A request is never rewritten simply because a lens needs a
 fallback. Capability discovery is repeated after a camera switch; a profile
 found on one lens is not assumed for another.
 
-Candidate selection is resolution-first, frame-rate-second, and codec-third.
-An HEVC request retries H.264 at the same size and frame rate before reducing
-either dimension. A configured candidate succeeds only when native readback
+Candidate selection for an explicit resolution is resolution-first,
+frame-rate-second, and codec-third; an automatic resolution puts the requested
+frame rate first. An explicit target is never upgraded while the lens has a
+format at or below it; a lens without one uses its closest larger format and
+reports `unsupportedProfile`, so a remembered profile does not make a camera
+switch fail. An HEVC request retries H.264 at the same size and frame rate
+before reducing either dimension. A configured candidate succeeds only when native readback
 matches its width, height, frame rate, and selected codec. Permission, access,
 and unrelated camera failures are errors, not fallbacks.
 
@@ -32,9 +36,16 @@ Releasing or disposing `CameraService` during a recording (for example when the
 app enters background) finalizes the recording instead of dropping it. `release()`
 and `dispose()` return the finalized file with the configured capture context but
 without inspection, so the caller that already awaits them can offer
-Save/Discard; the service never deletes it. If a macOS session is disposed
-directly while recording, the backend finalizes the file before replying to
-Dart, keeps it on disk and logs its path rather than dropping it.
+Save/Discard; the service never deletes it. On iOS, where a writer still
+writing when the app is suspended fails, the backend holds a background task
+from `willResignActive` and finalizes a running recording itself once the app
+is in the background; the next stop (and so `release()`) returns that file.
+If a macOS or iOS session is disposed directly while recording, the backend
+finalizes the file before replying to Dart, keeps it on disk and logs its path
+rather than dropping it. On app termination the macOS backend waits up to five
+seconds for that finalize without relying on the main run loop. macOS
+recordings are fragmented MP4, so a file whose finalize is cut short (a kill, a
+crash, a writer failure) stays readable up to its last one-second fragment.
 
 Focus and exposure default to continuous automatic behavior. A lock is applied
 only after convergence and only if both focus and exposure accept it; otherwise

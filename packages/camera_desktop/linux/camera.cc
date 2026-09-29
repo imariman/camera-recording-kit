@@ -344,6 +344,9 @@ GstFlowReturn Camera::OnNewSample(GstAppSink* sink, gpointer user_data) {
 
       auto* buf = self->image_stream_buffer_;
       buf->ready = 0;
+      // Order ready=0 before the pixel writes below, so a Dart reader that
+      // re-checks ready/sequence after its copy detects a torn frame.
+      std::atomic_thread_fence(std::memory_order_release);
 
       if (stride == width * 4) {
         memcpy(buf->pixels, map.data, frame_size);

@@ -22,9 +22,33 @@ most two seconds and reports convergence without changing the lock modes. The
 host applies both locks after a successful result; a timeout or unsupported lock
 returns `false` so the host can retain continuous automatic focus and exposure.
 
-Each exact profile includes encoder-validated H.264/HEVC support.
-Call `setRecordingVideoCodec` before controller creation to select the
-codec used by the next recording configuration.
+Each exact profile lists the codecs it can record. HEVC is only listed when
+the camera's video output reports it among the codecs it can feed to an
+`AVAssetWriter` for MP4 (when camera permission has not been granted yet, a
+VideoToolbox encoder check is used instead). Call `setRecordingVideoCodec`
+before controller creation to select the codec used by the next recording
+configuration. Creating a camera whose output does not offer the selected codec
+fails with `unsupportedRecordingProfile`, and `recordingQualityApplied` reports
+the codec taken from the writer settings rather than the request.
+
+## Front camera mirroring
+
+Front camera frames are mirrored (`AVCaptureConnection.isVideoMirrored`), like
+the system camera preview. The same connection feeds the `AVAssetWriter`, so
+front camera recordings are mirrored in the saved file as well. This backend
+has no API to turn mirroring off; the macOS backend offers `setMirror(false)`
+and the Android backend does not mirror recordings. Flip the file in
+post-processing if an unmirrored front camera recording is required.
+
+## Native tests
+
+`ios/camera_avfoundation/Tests/camera_avfoundationTests` holds XCTest coverage
+of device-free logic: exact format selection and the `btp2`/1:1 guard,
+capability building and codec filtering with fake formats, the focus/exposure
+settle rule, point-of-interest orientation, and stabilization readback. Run
+them on an iOS simulator with `python3 tool/test_ios_camera_native.py` from the
+repository root. They do not exercise a camera; recording, background
+transitions and device formats still need physical-device QA.
 
 [1]: https://pub.dev/packages/camera
 [2]: https://flutter.dev/to/endorsed-federated-plugin

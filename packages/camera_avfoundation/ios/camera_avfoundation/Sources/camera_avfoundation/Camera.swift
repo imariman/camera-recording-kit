@@ -64,8 +64,17 @@ protocol Camera: FlutterTexture, AVCaptureVideoDataOutputSampleBufferDelegate,
   func setImageFileFormat(_ fileFormat: PlatformImageFileFormat)
   func setJpegImageQuality(_ quality: Int64)
 
-  func setExposureMode(_ mode: PlatformExposureMode)
-  func setExposureOffset(_ offset: Double)
+  /// Sets the exposure mode. Fails without changing the device when it cannot be locked for
+  /// configuration.
+  func setExposureMode(
+    _ mode: PlatformExposureMode,
+    withCompletion: @escaping (Result<Void, any Error>) -> Void)
+
+  /// Sets the exposure target bias. Fails without changing the device when it cannot be locked
+  /// for configuration.
+  func setExposureOffset(
+    _ offset: Double,
+    withCompletion: @escaping (Result<Void, any Error>) -> Void)
 
   /// Sets the exposure point, in a (0,1) coordinate system.
   ///
@@ -85,8 +94,12 @@ protocol Camera: FlutterTexture, AVCaptureVideoDataOutputSampleBufferDelegate,
   /// AVCaptureFocusModeAutoFocus. If AVCaptureFocusModeAutoFocus is not supported focus mode will not
   /// be set.
   ///
+  /// Fails without changing the device when it cannot be locked for configuration.
+  ///
   /// @param mode The focus mode that should be applied.
-  func setFocusMode(_ mode: PlatformFocusMode)
+  func setFocusMode(
+    _ mode: PlatformFocusMode,
+    withCompletion: @escaping (Result<Void, any Error>) -> Void)
 
   /// Sets the focus point, in a (0,1) coordinate system.
   ///
@@ -106,6 +119,10 @@ protocol Camera: FlutterTexture, AVCaptureVideoDataOutputSampleBufferDelegate,
 
   /// Returns the active capture settings represented for the recording-quality channel.
   func recordingQualityApplied() -> [String: Any]
+
+  /// The asset writer codecs this camera's video output reports, when the camera captures from
+  /// the device named `cameraName` and the output knows them; nil otherwise.
+  func writerVideoCodecTypes(forCameraName cameraName: String) -> [AVVideoCodecType]?
 
   /// Waits for auto focus and exposure to settle without changing either mode.
   func waitForRecordingFocus(completion: @escaping (Bool) -> Void)
@@ -135,5 +152,14 @@ protocol Camera: FlutterTexture, AVCaptureVideoDataOutputSampleBufferDelegate,
     from connection: AVCaptureConnection
   )
 
-  func close()
+  /// Stops the capture sessions. A running recording is finalized (or cancelled and removed when
+  /// it cannot be finalized) before `completion` is called.
+  func close(completion: @escaping () -> Void)
+}
+
+extension Camera {
+  /// Closes the camera without waiting for a running recording to be finalized.
+  func close() {
+    close {}
+  }
 }

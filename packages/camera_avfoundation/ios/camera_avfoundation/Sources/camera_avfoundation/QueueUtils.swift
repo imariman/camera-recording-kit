@@ -23,3 +23,13 @@ func ensureToRunOnMainQueue(_ block: @escaping () -> Void) {
     }
   }
 }
+
+/// Carries a value into a `@Sendable` closure whose execution is serialized by the caller
+/// (for example by hopping to `captureSessionQueue` before the value is used).
+struct UncheckedSendableBox<Value>: @unchecked Sendable {
+  let value: Value
+
+  init(_ value: Value) {
+    self.value = value
+  }
+}

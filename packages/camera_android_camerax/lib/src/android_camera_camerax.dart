@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 import 'dart:async';
+import 'dart:io' show File, FileSystemException;
 import 'dart:math' show Point;
 
 import 'package:async/async.dart';
@@ -107,10 +108,17 @@ class AndroidCameraCameraX extends CameraPlatform {
   deviceOrientationChangedStreamController =
       StreamController<DeviceOrientationChangedEvent>.broadcast();
 
-  /// Stream queue to pick up finalized viceo recording events in
-  /// [stopVideoRecording].
-  final StreamQueue<VideoRecordEvent> videoRecordingEventStreamQueue =
+  /// Stream queue to pick up video recording events in [startVideoCapturing]
+  /// and [stopVideoRecording].
+  ///
+  /// Replaced by [dispose] so events of an abandoned recording do not reach the
+  /// next camera.
+  @visibleForTesting
+  StreamQueue<VideoRecordEvent> videoRecordingEventStreamQueue =
       StreamQueue<VideoRecordEvent>(videoRecordingEventStreamController.stream);
+
+  /// How long [dispose] waits for the Finalize of a recording it closes.
+  static const Duration _disposeFinalizeTimeout = Duration(seconds: 2);
 
   late final VideoRecordEventListener _videoRecordingEventListener =
       VideoRecordEventListener(
@@ -197,6 +205,56 @@ class AndroidCameraCameraX extends CameraPlatform {
   /// Error code indicating a [ZoomState] was requested, but one has not been
   /// set for the camera in use.
   static const String zoomStateNotSetErrorCode = 'zoomStateNotSet';
+
+  /// Error code of the [CameraException]s thrown when a video recording fails
+  /// to start, stop or finalize.
+  static const String videoRecordingFailedErrorCode = 'videoRecordingFailed';
+
+  /// `VideoRecordEvent.Finalize` error codes after which CameraX documents
+  /// that the output file, when it was generated, holds the data recorded
+  /// before the error. [stopVideoRecording] returns such a file (and reports
+  /// the early finalize through [onCameraError]) when it exists and is not
+  /// empty; without a file it throws.
+  ///
+  /// * `ERROR_FILE_SIZE_LIMIT_REACHED` (2) and `ERROR_DURATION_LIMIT_REACHED`
+  ///   (9): the data produced before the limit is saved. This plugin sets no
+  ///   such limit; they are listed for completeness.
+  /// * `ERROR_INSUFFICIENT_STORAGE` (3): storage that fills up during the
+  ///   recording still produces the output file; storage that is already full
+  ///   before the recording starts produces none.
+  /// * `ERROR_SOURCE_INACTIVE` (4): the camera stopped producing frames, for
+  ///   example because the activity lifecycle closed it when the app went to
+  ///   the background before [stopVideoRecording] ran; the file holds the
+  ///   frames captured until then.
+  ///
+  /// For every other code (`ERROR_UNKNOWN`, `ERROR_ENCODING_FAILED`,
+  /// `ERROR_RECORDER_ERROR`, `ERROR_NO_VALID_DATA`, ...) CameraX documents
+  /// that the output is missing or not properly constructed and must be
+  /// cleaned up, so [stopVideoRecording] deletes it and throws.
+  ///
+  /// See https://developer.android.com/reference/androidx/camera/video/VideoRecordEvent.Finalize.
+  static const Set<int> finalizeErrorsWithRecoverableOutput = <int>{2, 3, 4, 9};
+
+  static const Map<int, String> _finalizeErrorNames = <int, String>{
+    0: 'ERROR_NONE',
+    1: 'ERROR_UNKNOWN',
+    2: 'ERROR_FILE_SIZE_LIMIT_REACHED',
+    3: 'ERROR_INSUFFICIENT_STORAGE',
+    4: 'ERROR_SOURCE_INACTIVE',
+    5: 'ERROR_INVALID_OUTPUT_OPTIONS',
+    6: 'ERROR_ENCODING_FAILED',
+    7: 'ERROR_RECORDER_ERROR',
+    8: 'ERROR_NO_VALID_DATA',
+    9: 'ERROR_DURATION_LIMIT_REACHED',
+    10: 'ERROR_RECORDING_GARBAGE_COLLECTED',
+  };
+
+  /// Describes a `VideoRecordEvent.Finalize` error code, including its CameraX
+  /// constant name when known, for example `error code 3
+  /// (ERROR_INSUFFICIENT_STORAGE)`.
+  @visibleForTesting
+  static String describeVideoRecordFinalizeError(int error) =>
+      'error code $error (${_finalizeErrorNames[error] ?? 'unknown'})';
 
   /// Whether or not the capture orientation is locked.
   ///
@@ -377,6 +435,10 @@ class AndroidCameraCameraX extends CameraPlatform {
     CameraDescription cameraDescription,
     MediaSettings? mediaSettings,
   ) async {
+    // This platform instance outlives the cameras it creates, so values set
+    // on a previous camera must not leak into this one.
+    _resetPerCameraState();
+
     enableRecordingAudio = mediaSettings?.enableAudio ?? false;
     final CameraPermissionsError? error = await systemServicesManager
         .requestCameraPermissions(enableRecordingAudio);
@@ -414,7 +476,16 @@ class AndroidCameraCameraX extends CameraPlatform {
 
     // Retrieve a fresh ProcessCameraProvider instance.
     processCameraProvider ??= await ProcessCameraProvider.getInstance();
-    unawaited(processCameraProvider!.unbindAll());
+    // Not awaited to keep camera creation fast; platform calls are handled in
+    // order, so the binds below still run after it. Report a failure instead
+    // of dropping it as an unhandled async error.
+    unawaited(
+      processCameraProvider!.unbindAll().catchError((Object error) {
+        cameraErrorStreamController.add(
+          'Unbinding the previous camera use cases failed: $error',
+        );
+      }),
+    );
 
     // Configure Preview instance.
     preview = Preview(
@@ -534,11 +605,69 @@ class AndroidCameraCameraX extends CameraPlatform {
   /// Releases the resources of the accessed camera with ID [cameraId].
   @override
   Future<void> dispose(int cameraId) async {
+    _resetPerCameraState();
+    await _abandonActiveRecording();
     await preview?.releaseSurfaceProvider();
     await liveCameraState?.removeObservers();
     await processCameraProvider?.unbindAll();
     await imageAnalysis?.clearAnalyzer();
     await deviceOrientationManager.stopListeningForDeviceOrientationChange();
+  }
+
+  /// Best-effort cleanup of a recording that is still active when the camera
+  /// is disposed, for example because [stopVideoRecording] failed and the
+  /// caller went on to dispose.
+  ///
+  /// Closes the recording, waits briefly for its Finalize so it cannot be
+  /// mistaken for an event of the next recording, clears the recording state
+  /// so the next camera's [startVideoCapturing] does not silently no-op, and
+  /// replaces [videoRecordingEventStreamQueue] to drop every queued event. A
+  /// caller still waiting on the old queue gets a [CameraException].
+  Future<void> _abandonActiveRecording() async {
+    final Recording? activeRecording = recording;
+    if (activeRecording != null) {
+      try {
+        await activeRecording.close();
+        await _nextFinalizeOfCurrentRecording().timeout(
+          _disposeFinalizeTimeout,
+        );
+      } on TimeoutException {
+        // Finalize did not arrive in time; the queue reset below drops it.
+      } on Exception catch (e) {
+        cameraErrorStreamController.add(
+          'Closing the active recording while disposing the camera failed: $e',
+        );
+      }
+    }
+    recording = null;
+    pendingRecording = null;
+    videoOutputPath = null;
+
+    final StreamQueue<VideoRecordEvent> previousQueue =
+        videoRecordingEventStreamQueue;
+    videoRecordingEventStreamQueue = StreamQueue<VideoRecordEvent>(
+      videoRecordingEventStreamController.stream,
+    );
+    unawaited(previousQueue.cancel(immediate: true));
+  }
+
+  /// Resets the focus, exposure, flash/torch, orientation-lock and preview
+  /// state that belongs to a single created camera to its defaults.
+  ///
+  /// Called when a camera is created and disposed. The setters above skip work
+  /// when they believe a value is already applied, so a stale value from a
+  /// previous camera would otherwise make them silently no-op on the new one.
+  void _resetPerCameraState() {
+    currentFocusMeteringAction = null;
+    _currentFocusMode = FocusMode.auto;
+    _currentExposureMode = ExposureMode.auto;
+    _defaultFocusPointLocked = false;
+    _currentFlashMode = null;
+    torchEnabled = false;
+    captureOrientationLocked = false;
+    _lockedCaptureOrientation = null;
+    shouldSetDefaultRotation = false;
+    _previewIsPaused = false;
   }
 
   /// The camera with ID [cameraId] has been initialized.
@@ -1003,11 +1132,13 @@ class AndroidCameraCameraX extends CameraPlatform {
     }
     final CameraInfo? chosenCameraInfo = _savedCameras[description.name];
 
-    // Save CameraSelector that matches cameraDescription.
+    // Keep the new lens in locals until the bind succeeds, so a failed switch
+    // leaves the selector, facing and orientation of the bound camera intact.
     final LensFacing cameraSelectorLensDirection =
         _getCameraSelectorLensDirection(description.lensDirection);
-    cameraIsFrontFacing = cameraSelectorLensDirection == LensFacing.front;
-    cameraSelector = CameraSelector(cameraInfoForFilter: chosenCameraInfo);
+    final CameraSelector newCameraSelector = CameraSelector(
+      cameraInfoForFilter: chosenCameraInfo,
+    );
 
     // Unbind all use cases and rebind to new CameraSelector
     final useCases = <UseCase>[videoCapture!];
@@ -1022,16 +1153,44 @@ class AndroidCameraCameraX extends CameraPlatform {
         await processCameraProvider!.isBound(imageAnalysis!)) {
       useCases.add(imageAnalysis!);
     }
-    await processCameraProvider?.unbindAll();
-    camera = await processCameraProvider?.bindToLifecycle(
-      cameraSelector!,
-      useCases,
-    );
+    await processCameraProvider!.unbindAll();
+    final Camera newCamera;
+    try {
+      newCamera = await processCameraProvider!.bindToLifecycle(
+        newCameraSelector,
+        useCases,
+      );
+    } catch (_) {
+      // The new lens rejected the use cases (for example it does not support
+      // the recording profile). Rebind the previous lens so the camera is not
+      // left unbound, then report the original failure.
+      await _rebindAfterFailedSwitch(useCases);
+      rethrow;
+    }
 
+    camera = newCamera;
+    cameraSelector = newCameraSelector;
+    cameraIsFrontFacing = cameraSelectorLensDirection == LensFacing.front;
     // Retrieve info required for correcting the rotation of the camera preview
     sensorOrientationDegrees = description.sensorOrientation.toDouble();
 
     await _updateCameraInfoAndLiveCameraState(_flutterSurfaceTextureId);
+  }
+
+  /// Binds [useCases] to the current [cameraSelector] again after a camera
+  /// switch failed to bind them to the new one.
+  Future<void> _rebindAfterFailedSwitch(List<UseCase> useCases) async {
+    try {
+      camera = await processCameraProvider!.bindToLifecycle(
+        cameraSelector!,
+        useCases,
+      );
+      await _updateCameraInfoAndLiveCameraState(_flutterSurfaceTextureId);
+    } on Exception catch (e) {
+      cameraErrorStreamController.add(
+        'Restoring the previous camera after a failed camera switch failed: $e',
+      );
+    }
   }
 
   /// Resume the paused preview for the camera with ID [cameraId].
@@ -1215,13 +1374,13 @@ class AndroidCameraCameraX extends CameraPlatform {
 
     await _bindUseCaseToLifecycle(videoCapture!, options.cameraId);
 
-    // Set target rotation to default CameraX rotation only if capture
-    // orientation not locked.
-    if (!captureOrientationLocked && shouldSetDefaultRotation) {
-      await videoCapture!.setTargetRotation(
-        await deviceOrientationManager.getDefaultDisplayRotation(),
-      );
-    }
+    // VideoCapture is bound at initialize and stays bound between recordings,
+    // so its target rotation must be refreshed for every recording: the locked
+    // capture orientation if any, otherwise the current display rotation.
+    await videoCapture!.setTargetRotation(
+      _lockedCaptureOrientation ??
+          await deviceOrientationManager.getDefaultDisplayRotation(),
+    );
 
     videoOutputPath = await systemServicesManager.getTempFilePath(
       videoPrefix,
@@ -1247,39 +1406,91 @@ class AndroidCameraCameraX extends CameraPlatform {
       onStreamedFrameAvailable(options.cameraId).listen(streamCallback);
     }
 
-    // Wait for video recording to start.
-    VideoRecordEvent event = await videoRecordingEventStreamQueue.next;
-    while (event is! VideoRecordEventStart) {
-      event = await videoRecordingEventStreamQueue.next;
+    // Wait for video recording to start. A Finalize of this recording before
+    // its Start means CameraX could not start it (for example the recorder is
+    // busy or the camera source is inactive) and no Start will follow.
+    while (true) {
+      final VideoRecordEvent event = await _nextVideoRecordEvent();
+      if (event is VideoRecordEventStart) {
+        return;
+      }
+      if (event is VideoRecordEventFinalize &&
+          _finalizesCurrentRecording(event)) {
+        recording = null;
+        pendingRecording = null;
+        videoOutputPath = null;
+        throw CameraException(
+          videoRecordingFailedErrorCode,
+          'The recording was finalized before it started '
+          '(${describeVideoRecordFinalizeError(event.error)}).',
+        );
+      }
     }
   }
 
   /// Stops the video recording and returns the file where it was saved.
-  /// Throws a CameraException if the recording is currently null, or if the
-  /// videoOutputPath is null.
+  /// Throws a CameraException if the recording is currently null, if the
+  /// videoOutputPath is null, or if CameraX finalized the recording with an
+  /// error that leaves no usable file.
   ///
-  /// If the videoOutputPath is null the recording objects are cleaned up
-  /// so starting a new recording is possible.
+  /// A recording finalized early with one of
+  /// [finalizeErrorsWithRecoverableOutput] whose file exists is returned like a
+  /// successful one, and the early finalize is reported as a [CameraErrorEvent]
+  /// so the caller can offer the captured footage while learning why the
+  /// recording ended. Any other finalize error deletes the output (CameraX
+  /// documents it as missing or malformed) and throws.
+  ///
+  /// In every error case after the recording was closed, the recording
+  /// objects are cleaned up so starting a new recording is possible.
   @override
   Future<XFile> stopVideoRecording(int cameraId) async {
     if (recording == null) {
       throw CameraException(
-        'videoRecordingFailed',
+        videoRecordingFailedErrorCode,
         'Attempting to stop a '
-            'video recording while no recording is in progress.',
+        'video recording while no recording is in progress.',
       );
     }
 
     /// Stop the active recording and wait for the video recording to be finalized.
-    await recording!.close();
-    VideoRecordEvent event = await videoRecordingEventStreamQueue.next;
-    while (event is! VideoRecordEventFinalize) {
-      event = await videoRecordingEventStreamQueue.next;
+    final VideoRecordEventFinalize finalizeEvent;
+    try {
+      await recording!.close();
+      finalizeEvent = await _nextFinalizeOfCurrentRecording();
+    } finally {
+      recording = null;
+      pendingRecording = null;
     }
-    recording = null;
-    pendingRecording = null;
 
-    if (videoOutputPath == null) {
+    final String? outputPath = videoOutputPath;
+    if (finalizeEvent.error != 0) {
+      final String failure = describeVideoRecordFinalizeError(
+        finalizeEvent.error,
+      );
+      final bool recoverable =
+          finalizeErrorsWithRecoverableOutput.contains(finalizeEvent.error) &&
+          finalizeEvent.outputUri != null &&
+          outputPath != null &&
+          _fileHasData(outputPath);
+      if (!recoverable) {
+        if (outputPath != null) {
+          _deleteFile(outputPath);
+        }
+        throw CameraException(
+          videoRecordingFailedErrorCode,
+          'The recording was finalized with $failure and left no usable file.',
+        );
+      }
+      cameraEventStreamController.add(
+        CameraErrorEvent(
+          cameraId,
+          'The recording ended early with $failure; the file holds the '
+          'footage captured before the error.',
+        ),
+      );
+    }
+
+    if (outputPath == null) {
       // Handle any errors with finalizing video recording.
       throw CameraException(
         'INVALID_PATH',
@@ -1289,12 +1500,85 @@ class AndroidCameraCameraX extends CameraPlatform {
       );
     }
 
-    await _unbindUseCaseFromLifecycle(videoCapture!);
-    final videoFile = XFile(videoOutputPath!);
+    // VideoCapture stays bound (unlike upstream): it was bound with the Preview
+    // at initialize, and its capture callback feeds the recording-quality
+    // readback and waitForRecordingFocus. Unbinding it here would stop those
+    // results and make the next recording rebind it, which reconfigures the
+    // session and can drop a focus lock.
+    final videoFile = XFile(outputPath);
     cameraEventStreamController.add(
       VideoRecordedEvent(cameraId, videoFile, /* duration */ null),
     );
     return videoFile;
+  }
+
+  /// Whether a non-empty file exists at [path].
+  static bool _fileHasData(String path) {
+    try {
+      final File file = File(path);
+      return file.existsSync() && file.lengthSync() > 0;
+    } on FileSystemException {
+      return false;
+    }
+  }
+
+  /// Best-effort removal of an output that CameraX reported as unusable.
+  static void _deleteFile(String path) {
+    try {
+      final File file = File(path);
+      if (file.existsSync()) {
+        file.deleteSync();
+      }
+    } on FileSystemException {
+      // The app never learns this path; nothing else can clean it up, but a
+      // failed delete must not hide the finalize error.
+    }
+  }
+
+  /// Returns the next [VideoRecordEvent] reported by CameraX.
+  Future<VideoRecordEvent> _nextVideoRecordEvent() async {
+    try {
+      return await videoRecordingEventStreamQueue.next;
+    } on StateError {
+      // The queue was reset (see [dispose]) while this recording was waiting
+      // for an event, so no event for it will arrive.
+      throw CameraException(
+        videoRecordingFailedErrorCode,
+        'The camera was disposed before the recording reported its state.',
+      );
+    }
+  }
+
+  /// Waits for the [VideoRecordEventFinalize] of the current recording,
+  /// skipping every other event.
+  Future<VideoRecordEventFinalize> _nextFinalizeOfCurrentRecording() async {
+    while (true) {
+      final VideoRecordEvent event = await _nextVideoRecordEvent();
+      if (event is VideoRecordEventFinalize &&
+          _finalizesCurrentRecording(event)) {
+        return event;
+      }
+    }
+  }
+
+  /// Whether [event] finalizes the recording written to [videoOutputPath].
+  ///
+  /// A Finalize of an earlier recording (for example one closed while its
+  /// camera was disposed) can still arrive; it names a different output file.
+  /// The file names are compared because recording file names are unique and
+  /// CameraX may report a canonicalized directory. A Finalize without an output
+  /// URI cannot be attributed and is treated as the current one.
+  bool _finalizesCurrentRecording(VideoRecordEventFinalize event) {
+    final String? outputUri = event.outputUri;
+    final String? outputPath = videoOutputPath;
+    if (outputUri == null || outputPath == null) {
+      return true;
+    }
+    final Uri? uri = Uri.tryParse(outputUri);
+    if (uri == null || uri.pathSegments.isEmpty) {
+      return true;
+    }
+    return uri.pathSegments.last == outputPath.split('/').last;
   }
 
   /// Pause the current video recording of the camera with ID [cameraId] if it is not null.

@@ -1697,13 +1697,30 @@ class VideoRecordEventFinalize extends VideoRecordEvent {
   VideoRecordEventFinalize.pigeon_detached({
     super.pigeon_binaryMessenger,
     super.pigeon_instanceManager,
+    required this.error,
+    this.outputUri,
   }) : super.pigeon_detached();
+
+  /// The error type of the finalized recording.
+  ///
+  /// One of the `VideoRecordEvent.Finalize.ERROR_*` constants, or
+  /// `ERROR_NONE` (0) when the recording finished without error.
+  ///
+  /// See https://developer.android.com/reference/androidx/camera/video/VideoRecordEvent.Finalize#getError().
+  final int error;
+
+  /// The URI of the recording output, or null if CameraX reported an empty
+  /// URI (for example when no output was written).
+  ///
+  /// See https://developer.android.com/reference/androidx/camera/video/OutputResults#getOutputUri().
+  final String? outputUri;
 
   static void pigeon_setUpMessageHandlers({
     bool pigeon_clearHandlers = false,
     BinaryMessenger? pigeon_binaryMessenger,
     PigeonInstanceManager? pigeon_instanceManager,
-    VideoRecordEventFinalize Function()? pigeon_newInstance,
+    VideoRecordEventFinalize Function(int error, String? outputUri)?
+    pigeon_newInstance,
   }) {
     final _PigeonInternalProxyApiBaseCodec pigeonChannelCodec =
         _PigeonInternalProxyApiBaseCodec(
@@ -1722,13 +1739,17 @@ class VideoRecordEventFinalize extends VideoRecordEvent {
         pigeonVar_channel.setMessageHandler((Object? message) async {
           final List<Object?> args = message! as List<Object?>;
           final int arg_pigeon_instanceIdentifier = args[0]! as int;
+          final int arg_error = args[1]! as int;
+          final String? arg_outputUri = args[2] as String?;
           try {
             (pigeon_instanceManager ?? PigeonInstanceManager.instance)
                 .addHostCreatedInstance(
-                  pigeon_newInstance?.call() ??
+                  pigeon_newInstance?.call(arg_error, arg_outputUri) ??
                       VideoRecordEventFinalize.pigeon_detached(
                         pigeon_binaryMessenger: pigeon_binaryMessenger,
                         pigeon_instanceManager: pigeon_instanceManager,
+                        error: arg_error,
+                        outputUri: arg_outputUri,
                       ),
                   arg_pigeon_instanceIdentifier,
                 );
@@ -1750,6 +1771,8 @@ class VideoRecordEventFinalize extends VideoRecordEvent {
     return VideoRecordEventFinalize.pigeon_detached(
       pigeon_binaryMessenger: pigeon_binaryMessenger,
       pigeon_instanceManager: pigeon_instanceManager,
+      error: error,
+      outputUri: outputUri,
     );
   }
 }

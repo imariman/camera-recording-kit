@@ -26,10 +26,28 @@ policies unavailable to CameraX or AVFoundation.
 `tool/test_macos_camera_native.py` compiles and runs synthetic XCTest coverage
 against the native writer and image-processing code without a Flutter app or a
 physical camera. It requires macOS, full Xcode selected by `xcode-select`, and
-the macOS SDK. It is deliberately skipped on non-macOS hosts.
+the macOS SDK; run directly, it exits with an error on other hosts or with only
+the Command Line Tools. `tool/validate.sh` checks for full Xcode and skips it
+with a message when it is unavailable.
 
 Synthetic tests exercise media finalization and Vision/Core Image behavior;
 they do not establish webcam support, permission handling, visual quality, or
 sustained capture performance. Test built-in and external/Continuity cameras,
 unplug/reconnect behavior, and camera/microphone permission denial on real
-hardware before release.
+hardware before release. On macOS, unplugging the camera during a recording
+should finalize the file, emit a `cameraError`, and let `stopVideoRecording`
+return that file; quitting the app while recording should leave a playable
+file; with an external microphone selected as the system input, recordings
+should use it.
+
+## iOS native tests and limits
+
+`tool/test_ios_camera_native.py` compiles `camera_avfoundation` against the
+Flutter iOS engine (`flutter precache --ios`) and runs its XCTests on an iPhone
+simulator, booting one when none is running. They cover device-free logic only:
+exact format selection and the `btp2`/1:1 guard, capability and codec
+filtering with fake formats, the focus/exposure settle rule, point-of-interest
+orientation and stabilization readback. Recording through a background
+transition, `dispose` while recording, HEVC availability on the capture output,
+camera switches while recording and the format lists of real lenses must be
+checked on a physical device.
