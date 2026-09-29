@@ -40,5 +40,15 @@ has no API to turn mirroring off; the macOS backend offers `setMirror(false)`
 and the Android backend does not mirror recordings. Flip the file in
 post-processing if an unmirrored front camera recording is required.
 
+## Native tests
+
+`ios/camera_avfoundation/Tests/camera_avfoundationTests` holds XCTest coverage
+of device-free logic: exact format selection and the `btp2`/1:1 guard,
+capability building and codec filtering with fake formats, the focus/exposure
+settle rule, point-of-interest orientation, and stabilization readback. Run
+them on an iOS simulator with `python3 tool/test_ios_camera_native.py` from the
+repository root. They do not exercise a camera; recording, background
+transitions and device formats still need physical-device QA.
+
 [1]: https://pub.dev/packages/camera
 [2]: https://flutter.dev/to/endorsed-federated-plugin

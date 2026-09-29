@@ -52,6 +52,8 @@
 * `create` with an unknown camera name fails with `cameraNotFound` instead of
   crashing, and a missing audio device is reported instead of crashing.
 * Documents that front camera recordings are mirrored in the file.
+* Adds device-free XCTest coverage (`Tests/camera_avfoundationTests`, run with
+  `tool/test_ios_camera_native.py`) and Dart tests for null channel results.
 
 ## 0.10.2
 
