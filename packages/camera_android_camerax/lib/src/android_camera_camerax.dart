@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 import 'dart:async';
+import 'dart:io' show File, FileSystemException;
 import 'dart:math' show Point;
 
 import 'package:async/async.dart';
@@ -209,24 +210,30 @@ class AndroidCameraCameraX extends CameraPlatform {
   /// to start, stop or finalize.
   static const String videoRecordingFailedErrorCode = 'videoRecordingFailed';
 
-  /// `VideoRecordEvent.Finalize` error codes after which CameraX still wrote a
-  /// complete, playable output file, so [stopVideoRecording] returns it.
+  /// `VideoRecordEvent.Finalize` error codes after which CameraX documents
+  /// that the output file, when it was generated, holds the data recorded
+  /// before the error. [stopVideoRecording] returns such a file (and reports
+  /// the early finalize through [onCameraError]) when it exists and is not
+  /// empty; without a file it throws.
   ///
-  /// * `ERROR_NONE` (0).
   /// * `ERROR_FILE_SIZE_LIMIT_REACHED` (2) and `ERROR_DURATION_LIMIT_REACHED`
-  ///   (9): the file holds everything recorded up to the limit. This plugin
-  ///   sets no such limit; they are listed for completeness.
+  ///   (9): the data produced before the limit is saved. This plugin sets no
+  ///   such limit; they are listed for completeness.
+  /// * `ERROR_INSUFFICIENT_STORAGE` (3): storage that fills up during the
+  ///   recording still produces the output file; storage that is already full
+  ///   before the recording starts produces none.
   /// * `ERROR_SOURCE_INACTIVE` (4): the camera stopped producing frames, for
   ///   example because the activity lifecycle closed it when the app went to
-  ///   the background before [stopVideoRecording] ran. CameraX documents that
-  ///   the file holds the frames captured until then, so the recording is
-  ///   delivered instead of being lost.
+  ///   the background before [stopVideoRecording] ran; the file holds the
+  ///   frames captured until then.
   ///
-  /// Any other code (for example `ERROR_INSUFFICIENT_STORAGE` or
-  /// `ERROR_NO_VALID_DATA`) makes [stopVideoRecording] throw.
+  /// For every other code (`ERROR_UNKNOWN`, `ERROR_ENCODING_FAILED`,
+  /// `ERROR_RECORDER_ERROR`, `ERROR_NO_VALID_DATA`, ...) CameraX documents
+  /// that the output is missing or not properly constructed and must be
+  /// cleaned up, so [stopVideoRecording] deletes it and throws.
   ///
   /// See https://developer.android.com/reference/androidx/camera/video/VideoRecordEvent.Finalize.
-  static const Set<int> finalizeErrorsWithUsableOutput = <int>{0, 2, 4, 9};
+  static const Set<int> finalizeErrorsWithRecoverableOutput = <int>{2, 3, 4, 9};
 
   static const Map<int, String> _finalizeErrorNames = <int, String>{
     0: 'ERROR_NONE',
@@ -1424,8 +1431,14 @@ class AndroidCameraCameraX extends CameraPlatform {
   /// Stops the video recording and returns the file where it was saved.
   /// Throws a CameraException if the recording is currently null, if the
   /// videoOutputPath is null, or if CameraX finalized the recording with an
-  /// error that leaves no usable file (see
-  /// [finalizeErrorsWithUsableOutput]).
+  /// error that leaves no usable file.
+  ///
+  /// A recording finalized early with one of
+  /// [finalizeErrorsWithRecoverableOutput] whose file exists is returned like a
+  /// successful one, and the early finalize is reported as a [CameraErrorEvent]
+  /// so the caller can offer the captured footage while learning why the
+  /// recording ended. Any other finalize error deletes the output (CameraX
+  /// documents it as missing or malformed) and throws.
   ///
   /// In every error case after the recording was closed, the recording
   /// objects are cleaned up so starting a new recording is possible.
@@ -1449,15 +1462,35 @@ class AndroidCameraCameraX extends CameraPlatform {
       pendingRecording = null;
     }
 
-    if (!finalizeErrorsWithUsableOutput.contains(finalizeEvent.error)) {
-      throw CameraException(
-        videoRecordingFailedErrorCode,
-        'The recording was finalized with '
-        '${describeVideoRecordFinalizeError(finalizeEvent.error)}.',
+    final String? outputPath = videoOutputPath;
+    if (finalizeEvent.error != 0) {
+      final String failure = describeVideoRecordFinalizeError(
+        finalizeEvent.error,
+      );
+      final bool recoverable =
+          finalizeErrorsWithRecoverableOutput.contains(finalizeEvent.error) &&
+          finalizeEvent.outputUri != null &&
+          outputPath != null &&
+          _fileHasData(outputPath);
+      if (!recoverable) {
+        if (outputPath != null) {
+          _deleteFile(outputPath);
+        }
+        throw CameraException(
+          videoRecordingFailedErrorCode,
+          'The recording was finalized with $failure and left no usable file.',
+        );
+      }
+      cameraEventStreamController.add(
+        CameraErrorEvent(
+          cameraId,
+          'The recording ended early with $failure; the file holds the '
+          'footage captured before the error.',
+        ),
       );
     }
 
-    if (videoOutputPath == null) {
+    if (outputPath == null) {
       // Handle any errors with finalizing video recording.
       throw CameraException(
         'INVALID_PATH',
@@ -1472,11 +1505,34 @@ class AndroidCameraCameraX extends CameraPlatform {
     // readback and waitForRecordingFocus. Unbinding it here would stop those
     // results and make the next recording rebind it, which reconfigures the
     // session and can drop a focus lock.
-    final videoFile = XFile(videoOutputPath!);
+    final videoFile = XFile(outputPath);
     cameraEventStreamController.add(
       VideoRecordedEvent(cameraId, videoFile, /* duration */ null),
     );
     return videoFile;
+  }
+
+  /// Whether a non-empty file exists at [path].
+  static bool _fileHasData(String path) {
+    try {
+      final File file = File(path);
+      return file.existsSync() && file.lengthSync() > 0;
+    } on FileSystemException {
+      return false;
+    }
+  }
+
+  /// Best-effort removal of an output that CameraX reported as unusable.
+  static void _deleteFile(String path) {
+    try {
+      final File file = File(path);
+      if (file.existsSync()) {
+        file.deleteSync();
+      }
+    } on FileSystemException {
+      // The app never learns this path; nothing else can clean it up, but a
+      // failed delete must not hide the finalize error.
+    }
   }
 
   /// Returns the next [VideoRecordEvent] reported by CameraX.

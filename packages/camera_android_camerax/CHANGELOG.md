@@ -7,11 +7,16 @@
   `VideoRecordEventFinalize`. `stopVideoRecording` now throws a
   `CameraException` (code `videoRecordingFailed`, message naming the CameraX
   error code) when a recording is finalized with an error that leaves no usable
-  file, such as `ERROR_INSUFFICIENT_STORAGE` or `ERROR_NO_VALID_DATA`, instead
-  of returning it as a successful recording. A recording finalized with
+  file, such as `ERROR_NO_VALID_DATA` or `ERROR_ENCODING_FAILED`, instead of
+  returning it as a successful recording; the malformed output CameraX asks
+  the app to clean up is deleted. A recording finalized early with
+  `ERROR_INSUFFICIENT_STORAGE` (storage filled up during the recording),
   `ERROR_SOURCE_INACTIVE` (camera closed, for example by the activity lifecycle
   when the app goes to the background) or a size/duration limit is still
-  returned, because CameraX writes a playable file in those cases.
+  returned when its file exists, because CameraX keeps the footage captured
+  before the error; the early finalize is reported as a `CameraErrorEvent`
+  (`CameraController.value.errorDescription`) so the app can tell the user
+  why the recording stopped.
 * `startVideoCapturing` now throws and clears the recording when CameraX
   finalizes it before it starts, instead of waiting forever for a start event.
 * Finalize events of an earlier recording (a different output file) are no

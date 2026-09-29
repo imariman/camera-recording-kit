@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 import 'dart:async';
+import 'dart:io' show Directory, File;
 import 'dart:math' show Point;
 
 import 'package:async/async.dart';
@@ -3622,8 +3623,27 @@ void main() {
     });
 
     group('recording lifecycle', () {
-      const outputPath = '/data/cache/REC42.mp4';
-      const outputUri = 'file://$outputPath';
+      // The stop path checks the output file CameraX wrote, so recordings
+      // target real files in a temporary directory.
+      late Directory outputDirectory;
+      late String outputPath;
+      late String outputUri;
+
+      setUp(() {
+        outputDirectory = Directory.systemTemp.createTempSync(
+          'camerax_recording_lifecycle',
+        );
+        outputPath = '${outputDirectory.path}/REC42.mp4';
+        outputUri = 'file://$outputPath';
+        // Unless a test removes it, the recording has produced output.
+        File(outputPath).writeAsBytesSync(List<int>.filled(16, 0));
+      });
+
+      tearDown(() {
+        if (outputDirectory.existsSync()) {
+          outputDirectory.deleteSync(recursive: true);
+        }
+      });
 
       Matcher throwsRecordingFailure(String description) => throwsA(
         isA<CameraException>()
@@ -3777,7 +3797,7 @@ void main() {
       );
 
       test(
-        'stopVideoRecording throws with the error code and cleans up when the recording is finalized with an error',
+        'stopVideoRecording throws, deletes the malformed output and cleans up when the recording is finalized with an unrecoverable error',
         () async {
           final camera = AndroidCameraCameraX();
           final MockRecording recording = setUpActiveRecording(camera);
@@ -3788,18 +3808,21 @@ void main() {
 
           AndroidCameraCameraX.videoRecordingEventStreamController.add(
             VideoRecordEventFinalize.pigeon_detached(
-              error: 3,
+              error: 7,
               outputUri: outputUri,
             ),
           );
 
           await expectLater(
             camera.stopVideoRecording(0),
-            throwsRecordingFailure('error code 3 (ERROR_INSUFFICIENT_STORAGE)'),
+            throwsRecordingFailure('error code 7 (ERROR_RECORDER_ERROR)'),
           );
           verify(recording.close());
           expect(camera.recording, isNull);
           expect(camera.pendingRecording, isNull);
+          // CameraX documents the output as not properly constructed and asks
+          // the app to clean it up; Dart never learns its path.
+          expect(File(outputPath).existsSync(), isFalse);
           await Future<void>.delayed(Duration.zero);
           expect(recordedEvents, isEmpty);
           await subscription.cancel();
@@ -3821,6 +3844,91 @@ void main() {
             throwsRecordingFailure('error code 8 (ERROR_NO_VALID_DATA)'),
           );
           expect(camera.recording, isNull);
+          expect(File(outputPath).existsSync(), isFalse);
+        },
+      );
+
+      test(
+        'stopVideoRecording returns the footage recorded before the storage filled up and reports the early finalize',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpActiveRecording(camera);
+          final errors = <CameraErrorEvent>[];
+          final recordedEvents = <VideoRecordedEvent>[];
+          final StreamSubscription<CameraErrorEvent> errorSubscription = camera
+              .onCameraError(0)
+              .listen(errors.add);
+          final StreamSubscription<VideoRecordedEvent> recordedSubscription =
+              camera.onVideoRecordedEvent(0).listen(recordedEvents.add);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(
+              error: 3,
+              outputUri: outputUri,
+            ),
+          );
+
+          final XFile file = await camera.stopVideoRecording(0);
+
+          expect(file.path, outputPath);
+          expect(File(outputPath).existsSync(), isTrue);
+          expect(camera.recording, isNull);
+          await Future<void>.delayed(Duration.zero);
+          expect(recordedEvents.map((e) => e.file.path), [outputPath]);
+          expect(errors, hasLength(1));
+          expect(
+            errors.single.description,
+            allOf(
+              contains('ended early'),
+              contains('error code 3 (ERROR_INSUFFICIENT_STORAGE)'),
+            ),
+          );
+          await errorSubscription.cancel();
+          await recordedSubscription.cancel();
+        },
+      );
+
+      test(
+        'stopVideoRecording throws when the storage was already full and no output was produced',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpActiveRecording(camera);
+          File(outputPath).deleteSync();
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(
+              error: 3,
+              outputUri: outputUri,
+            ),
+          );
+
+          await expectLater(
+            camera.stopVideoRecording(0),
+            throwsRecordingFailure('error code 3 (ERROR_INSUFFICIENT_STORAGE)'),
+          );
+          expect(camera.recording, isNull);
+        },
+      );
+
+      test(
+        'stopVideoRecording throws for a recoverable error code whose output is empty',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpActiveRecording(camera);
+          File(outputPath).writeAsBytesSync(const <int>[]);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(
+              error: 4,
+              outputUri: outputUri,
+            ),
+          );
+
+          await expectLater(
+            camera.stopVideoRecording(0),
+            throwsRecordingFailure('error code 4 (ERROR_SOURCE_INACTIVE)'),
+          );
+          expect(File(outputPath).existsSync(), isFalse);
         },
       );
 
@@ -3829,6 +3937,10 @@ void main() {
         () async {
           final camera = AndroidCameraCameraX();
           setUpActiveRecording(camera);
+          final errors = <CameraErrorEvent>[];
+          final StreamSubscription<CameraErrorEvent> subscription = camera
+              .onCameraError(0)
+              .listen(errors.add);
 
           AndroidCameraCameraX.videoRecordingEventStreamController.add(
             VideoRecordEventFinalize.pigeon_detached(
@@ -3841,6 +3953,35 @@ void main() {
 
           expect(file.path, outputPath);
           expect(camera.recording, isNull);
+          await Future<void>.delayed(Duration.zero);
+          expect(errors.map((e) => e.description), [
+            contains('error code 4 (ERROR_SOURCE_INACTIVE)'),
+          ]);
+          await subscription.cancel();
+        },
+      );
+
+      test(
+        'stopVideoRecording emits no error event for a clean finalize',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpActiveRecording(camera);
+          final errors = <CameraErrorEvent>[];
+          final StreamSubscription<CameraErrorEvent> subscription = camera
+              .onCameraError(0)
+              .listen(errors.add);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(
+              error: 0,
+              outputUri: outputUri,
+            ),
+          );
+
+          expect((await camera.stopVideoRecording(0)).path, outputPath);
+          await Future<void>.delayed(Duration.zero);
+          expect(errors, isEmpty);
+          await subscription.cancel();
         },
       );
 
