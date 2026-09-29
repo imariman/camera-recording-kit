@@ -12,6 +12,12 @@ Keep the normal `camera` dependency required by your application, then use the
 kit's packages from this repository. Pin `ref` to a reviewed tag or commit in
 production.
 
+The kit requires Flutter 3.44 or newer (Dart 3.12). `camera_recording` and
+`camera_android_camerax` declare `sdk: ^3.12.0` and `flutter: ">=3.44.0"`, the
+strictest constraints in the repository, so older Flutter releases fail at
+`pub get` with an SDK version error even though `camera: ^0.12.0+2` alone
+would resolve.
+
 ```yaml
 dependencies:
   camera: ^0.12.0+2
@@ -40,10 +46,14 @@ dependency_overrides:
 ```
 
 Replace every `SAME_COMMIT` with the same reviewed repository commit or tag.
-The overrides keep Flutter's `camera` package resolving its platform
-implementations to this repository. `camera_recording` is already pinned by
-its direct Git dependency; the other three names override the hosted camera
-implementations selected transitively by `camera`.
+The overrides are required: `camera` depends on the hosted upstream
+`camera_android_camerax` and `camera_avfoundation`, which lack this kit's
+quality extensions, while `camera_recording` depends on this repository's
+copies, so without the overrides `pub get` fails on the conflicting sources.
+`camera_recording` is already pinned by its direct Git dependency. `camera_android_camerax` and `camera_avfoundation`
+override the implementations that `camera` endorses. `camera` endorses no
+desktop implementation, so `camera_desktop` reaches the application through
+`camera_recording`; its override keeps it on the same commit.
 
 ## Support and quality boundary
 

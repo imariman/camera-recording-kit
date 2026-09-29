@@ -2,25 +2,26 @@
 
 ## Core Workflows
 
-- **Check Environment**: Run [check-readiness](.agents/skills/check-readiness/SKILL.md)
-  when starting a new task or if you suspect environment issues.
 - **Regenerate Code**:
   - Pigeon (`dart run pigeon --input pigeons/camerax_library.dart`): Run after
     modifying `pigeons/camerax_library.dart`.
   - Mocks (`dart run build_runner build -d`): Run after modifying mocked
-    classes or adding new mocks. (see [dart-generate-test-mocks](.agents/skills/dart-generate-test-mocks/SKILL.md))
+    classes or adding new mocks.
 - **Verify Tests**: All tests must pass before landing. Add or update tests for
-  any new logic. For integration tests, see [flutter-add-integration-test](.agents/skills/flutter-add-integration-test/SKILL.md).
-- **Run Pre-Push Checks**: Run [pre-push-skill](.agents/skills/pre-push-skill/SKILL.md)
-  before pushing to prevent CI failures and code review blocks.
+  any new logic. From the repository root, run `bash tool/validate.sh` (Dart
+  analysis and tests of every package) and `bash tool/test_android_jvm.sh`
+  (the Java/Robolectric unit tests of this package; needs JDK 17 or newer and
+  the Android SDK).
+
+The upstream `.agents/skills` directories (readiness, pre-push and review
+skills) were not imported into this repository; see
+[`docs/UPSTREAM_LIMITATIONS.md`](../../docs/UPSTREAM_LIMITATIONS.md).
 
 ## Agent Guidelines
 
-- Use [receiving-code-review](.agents/skills/receiving-code-review/SKILL.md)
-  to technically verify review feedback before blindly implementing suggestions,
+- Technically verify review feedback before implementing suggestions,
   especially if feedback seems technically questionable.
-- Use `/grill-me` or `/plan` for complex features before writing code.
-- Maintain high test coverage using [dart-add-unit-test](.agents/skills/dart-add-unit-test/SKILL.md)
-  and [dart-collect-coverage](.agents/skills/dart-collect-coverage/SKILL.md).
+- Plan complex features before writing code.
+- Maintain high test coverage for new Dart and Java logic.
 - Avoid duplicating constant strings; reuse existing ones from adjacent code.
 - **CRITICAL**: When spawning subagents, NEVER provide absolute file paths in prompts. ALWAYS use relative paths. Passing absolute paths breaks `Workspace: branch` isolation and causes state bleed into the active workspace.
