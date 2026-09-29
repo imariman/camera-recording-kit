@@ -1,3 +1,11 @@
+## Unreleased
+
+* Fails `setFocusMode`, `setExposureMode`, `setExposureOffset`,
+  `setFocusPoint`, `setExposurePoint` and torch changes with an error when the
+  device cannot be locked for configuration, instead of raising an
+  `NSGenericException`. A torch that cannot be turned on at recording start is
+  reported through the camera error stream and the recording continues.
+
 ## 0.10.2
 
 * Adds encoder-validated H.264/HEVC capability metadata and one-shot codec

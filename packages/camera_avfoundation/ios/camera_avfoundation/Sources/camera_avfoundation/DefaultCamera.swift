@@ -292,13 +292,12 @@ final class DefaultCamera: NSObject, Camera {
     case .max:
       if let bestFormat = highestResolutionFormat(forCaptureDevice: captureDevice) {
         videoCaptureSession.sessionPreset = .inputPriority
-        do {
-          try captureDevice.lockForConfiguration()
-          // Set the best device format found and finish the device configuration.
-          captureDevice.flutterActiveFormat = bestFormat
-          captureDevice.unlockForConfiguration()
-          break
-        }
+        // A lock failure propagates to the caller; the format is only written while locked.
+        try captureDevice.lockForConfiguration()
+        defer { captureDevice.unlockForConfiguration() }
+        // Set the best device format found and finish the device configuration.
+        captureDevice.flutterActiveFormat = bestFormat
+        break
       }
       fallthrough
     case .ultraHigh:
@@ -719,9 +718,14 @@ final class DefaultCamera: NSObject, Camera {
     }
 
     if flashMode == .torch {
-      try? captureDevice.lockForConfiguration()
-      captureDevice.torchMode = .on
-      captureDevice.unlockForConfiguration()
+      // A torch failure must not abort the recording; report it and record without the torch.
+      do {
+        try captureDevice.lockForConfiguration()
+        defer { captureDevice.unlockForConfiguration() }
+        captureDevice.torchMode = .on
+      } catch {
+        reportErrorMessage("Unable to turn on the torch: \(error.localizedDescription)")
+      }
     }
 
     mediaSettingsAVWrapper.addInput(videoWriterInput, to: videoWriter)
@@ -929,34 +933,59 @@ final class DefaultCamera: NSObject, Camera {
     self.imageQuality = quality
   }
 
-  func setExposureMode(_ mode: PlatformExposureMode) {
+  func setExposureMode(
+    _ mode: PlatformExposureMode,
+    withCompletion completion: @escaping (Result<Void, any Error>) -> Void
+  ) {
+    do {
+      try captureDevice.lockForConfiguration()
+    } catch {
+      completion(.failure(DefaultCamera.pigeonErrorFromNSError(error as NSError)))
+      return
+    }
+    defer { captureDevice.unlockForConfiguration() }
+
     exposureMode = mode
-    applyExposureMode()
+    writeExposureMode()
+    completion(.success(()))
   }
 
-  private func applyExposureMode() {
-    try? captureDevice.lockForConfiguration()
+  /// Writes `exposureMode` to the device and restarts metering.
+  ///
+  /// The caller must hold the device configuration lock.
+  private func writeExposureMode() {
     switch exposureMode {
     case .locked:
       // AVCaptureExposureMode.autoExpose automatically adjusts the exposure one time, and then locks exposure for the device
-      captureDevice.exposureMode = .autoExpose
+      if captureDevice.isExposureModeSupported(.autoExpose) {
+        captureDevice.exposureMode = .autoExpose
+      }
     case .auto:
       if captureDevice.isExposureModeSupported(.continuousAutoExposure) {
         captureDevice.exposureMode = .continuousAutoExposure
-      } else {
+      } else if captureDevice.isExposureModeSupported(.autoExpose) {
         captureDevice.exposureMode = .autoExpose
       }
     @unknown default:
       assertionFailure("Unknown exposure mode")
     }
-    captureDevice.unlockForConfiguration()
     lastMeteringChange = DispatchTime.now()
   }
 
-  func setExposureOffset(_ offset: Double) {
-    try? captureDevice.lockForConfiguration()
+  func setExposureOffset(
+    _ offset: Double,
+    withCompletion completion: @escaping (Result<Void, any Error>) -> Void
+  ) {
+    do {
+      try captureDevice.lockForConfiguration()
+    } catch {
+      completion(.failure(DefaultCamera.pigeonErrorFromNSError(error as NSError)))
+      return
+    }
+    defer { captureDevice.unlockForConfiguration() }
+
     captureDevice.setExposureTargetBias(Float(offset), completionHandler: nil)
-    captureDevice.unlockForConfiguration()
+    completion(.success(()))
   }
 
   func setExposurePoint(
@@ -973,20 +1002,38 @@ final class DefaultCamera: NSObject, Camera {
     }
 
     let orientation = UIDevice.current.orientation
-    try? captureDevice.lockForConfiguration()
+    do {
+      try captureDevice.lockForConfiguration()
+    } catch {
+      completion(.failure(DefaultCamera.pigeonErrorFromNSError(error as NSError)))
+      return
+    }
+    defer { captureDevice.unlockForConfiguration() }
+
     // A nil point resets to the center.
     let exposurePoint = cgPoint(
       for: point ?? PlatformPoint(x: 0.5, y: 0.5), withOrientation: orientation)
     captureDevice.exposurePointOfInterest = exposurePoint
-    captureDevice.unlockForConfiguration()
     // Retrigger auto exposure
-    applyExposureMode()
+    writeExposureMode()
     completion(.success(()))
   }
 
-  func setFocusMode(_ mode: PlatformFocusMode) {
+  func setFocusMode(
+    _ mode: PlatformFocusMode,
+    withCompletion completion: @escaping (Result<Void, any Error>) -> Void
+  ) {
+    do {
+      try captureDevice.lockForConfiguration()
+    } catch {
+      completion(.failure(DefaultCamera.pigeonErrorFromNSError(error as NSError)))
+      return
+    }
+    defer { captureDevice.unlockForConfiguration() }
+
     focusMode = mode
-    applyFocusMode()
+    writeFocusMode()
+    completion(.success(()))
   }
 
   func setFocusPoint(
@@ -1003,28 +1050,28 @@ final class DefaultCamera: NSObject, Camera {
     }
 
     let orientation = deviceOrientationProvider.orientation
-    try? captureDevice.lockForConfiguration()
+    do {
+      try captureDevice.lockForConfiguration()
+    } catch {
+      completion(.failure(DefaultCamera.pigeonErrorFromNSError(error as NSError)))
+      return
+    }
+    defer { captureDevice.unlockForConfiguration() }
+
     // A nil point resets to the center.
     captureDevice.focusPointOfInterest =
       cgPoint(
         for: point ?? PlatformPoint(x: 0.5, y: 0.5),
         withOrientation: orientation)
-
-    captureDevice.unlockForConfiguration()
     // Retrigger auto focus
-    applyFocusMode()
+    writeFocusMode()
     completion(.success(()))
   }
 
-  private func applyFocusMode() {
-    applyFocusMode(focusMode, onDevice: captureDevice)
-    lastMeteringChange = DispatchTime.now()
-  }
-
-  private func applyFocusMode(
-    _ focusMode: PlatformFocusMode, onDevice captureDevice: CaptureDevice
-  ) {
-    try? captureDevice.lockForConfiguration()
+  /// Writes `focusMode` to the device and restarts metering.
+  ///
+  /// The caller must hold the device configuration lock.
+  private func writeFocusMode() {
     switch focusMode {
     case .locked:
       // AVCaptureFocusMode.autoFocus automatically adjusts the focus one time, and then locks focus
@@ -1040,7 +1087,7 @@ final class DefaultCamera: NSObject, Camera {
     @unknown default:
       assertionFailure("Unknown focus mode")
     }
-    captureDevice.unlockForConfiguration()
+    lastMeteringChange = DispatchTime.now()
   }
 
   private func cgPoint(
@@ -1092,9 +1139,9 @@ final class DefaultCamera: NSObject, Camera {
       completion(.failure(DefaultCamera.pigeonErrorFromNSError(error)))
       return
     }
+    defer { captureDevice.unlockForConfiguration() }
 
     captureDevice.videoZoomFactor = zoom
-    captureDevice.unlockForConfiguration()
     completion(.success(()))
   }
 
@@ -1226,9 +1273,14 @@ final class DefaultCamera: NSObject, Camera {
         return
       }
       if captureDevice.torchMode != .on {
-        try? captureDevice.lockForConfiguration()
+        do {
+          try captureDevice.lockForConfiguration()
+        } catch {
+          completion(.failure(DefaultCamera.pigeonErrorFromNSError(error as NSError)))
+          return
+        }
+        defer { captureDevice.unlockForConfiguration() }
         captureDevice.torchMode = .on
-        captureDevice.unlockForConfiguration()
       }
     case .off, .auto, .always:
       guard captureDevice.hasFlash else {
@@ -1252,9 +1304,14 @@ final class DefaultCamera: NSObject, Camera {
         return
       }
       if captureDevice.torchMode != .off {
-        try? captureDevice.lockForConfiguration()
+        do {
+          try captureDevice.lockForConfiguration()
+        } catch {
+          completion(.failure(DefaultCamera.pigeonErrorFromNSError(error as NSError)))
+          return
+        }
+        defer { captureDevice.unlockForConfiguration() }
         captureDevice.torchMode = .off
-        captureDevice.unlockForConfiguration()
       }
     @unknown default:
       assertionFailure("Unknown flash mode")

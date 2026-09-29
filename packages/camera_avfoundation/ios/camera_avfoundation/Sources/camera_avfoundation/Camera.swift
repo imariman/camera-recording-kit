@@ -64,8 +64,17 @@ protocol Camera: FlutterTexture, AVCaptureVideoDataOutputSampleBufferDelegate,
   func setImageFileFormat(_ fileFormat: PlatformImageFileFormat)
   func setJpegImageQuality(_ quality: Int64)
 
-  func setExposureMode(_ mode: PlatformExposureMode)
-  func setExposureOffset(_ offset: Double)
+  /// Sets the exposure mode. Fails without changing the device when it cannot be locked for
+  /// configuration.
+  func setExposureMode(
+    _ mode: PlatformExposureMode,
+    withCompletion: @escaping (Result<Void, any Error>) -> Void)
+
+  /// Sets the exposure target bias. Fails without changing the device when it cannot be locked
+  /// for configuration.
+  func setExposureOffset(
+    _ offset: Double,
+    withCompletion: @escaping (Result<Void, any Error>) -> Void)
 
   /// Sets the exposure point, in a (0,1) coordinate system.
   ///
@@ -85,8 +94,12 @@ protocol Camera: FlutterTexture, AVCaptureVideoDataOutputSampleBufferDelegate,
   /// AVCaptureFocusModeAutoFocus. If AVCaptureFocusModeAutoFocus is not supported focus mode will not
   /// be set.
   ///
+  /// Fails without changing the device when it cannot be locked for configuration.
+  ///
   /// @param mode The focus mode that should be applied.
-  func setFocusMode(_ mode: PlatformFocusMode)
+  func setFocusMode(
+    _ mode: PlatformFocusMode,
+    withCompletion: @escaping (Result<Void, any Error>) -> Void)
 
   /// Sets the focus point, in a (0,1) coordinate system.
   ///

@@ -552,8 +552,11 @@ extension CameraPlugin: CameraApi {
     mode: PlatformExposureMode, completion: @escaping (Result<Void, any Error>) -> Void
   ) {
     captureSessionQueue.async { [weak self] in
-      self?.camera?.setExposureMode(mode)
-      completion(.success(()))
+      guard let camera = self?.camera else {
+        completion(.success(()))
+        return
+      }
+      camera.setExposureMode(mode, withCompletion: completion)
     }
   }
 
@@ -587,8 +590,11 @@ extension CameraPlugin: CameraApi {
 
   func setExposureOffset(offset: Double, completion: @escaping (Result<Void, any Error>) -> Void) {
     captureSessionQueue.async { [weak self] in
-      self?.camera?.setExposureOffset(offset)
-      completion(.success(()))
+      guard let camera = self?.camera else {
+        completion(.success(()))
+        return
+      }
+      camera.setExposureOffset(offset, withCompletion: completion)
     }
   }
 
@@ -596,8 +602,11 @@ extension CameraPlugin: CameraApi {
     mode: PlatformFocusMode, completion: @escaping (Result<Void, any Error>) -> Void
   ) {
     captureSessionQueue.async { [weak self] in
-      self?.camera?.setFocusMode(mode)
-      completion(.success(()))
+      guard let camera = self?.camera else {
+        completion(.success(()))
+        return
+      }
+      camera.setFocusMode(mode, withCompletion: completion)
     }
   }
 
