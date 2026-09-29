@@ -42,6 +42,11 @@
   `mimeType`, matching iOS and macOS, instead of the video track MIME type, and
   no longer falls back to the container subtype (`mp4`) as `codec` when the file
   has no video track.
+* Only bind failures caused by an unsupported use-case configuration (surface
+  combination, resolution, quality or frame rate) are reported as
+  `unsupportedRecordingProfile`. Other `IllegalArgumentException`s, such as a
+  missing (unplugged) camera, stay generic errors instead of making callers try
+  every lower profile.
 
 ## 0.7.4+3
 

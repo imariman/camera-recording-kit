@@ -52,7 +52,10 @@ camera session and the readback above keeps working between recordings. Still
 capture and image analysis remain available and are bound lazily when requested. Recording
 quality selection uses an exact CameraX `QualitySelector`; callers should retry
 their own approved lower profile after `unsupportedRecordingProfile` instead of
-assuming a fallback was applied.
+assuming a fallback was applied. Binding reports `unsupportedRecordingProfile`
+only when CameraX rejects the use-case configuration (surface combination,
+resolution, quality or frame rate); other failures, such as a camera that is no
+longer available, are reported as errors.
 
 ## Limitations
 

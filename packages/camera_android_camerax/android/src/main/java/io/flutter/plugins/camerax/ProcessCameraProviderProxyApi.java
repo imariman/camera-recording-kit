@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat;
 import androidx.lifecycle.LifecycleOwner;
 import com.google.common.util.concurrent.ListenableFuture;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.ExecutionException;
 import kotlin.Result;
 import kotlin.Unit;
@@ -76,7 +77,7 @@ class ProcessCameraProviderProxyApi extends PigeonApiProcessCameraProvider {
             .registerBoundCamera(cameraSelector, useCases, camera);
         return camera;
       } catch (IllegalArgumentException exception) {
-        if (containsVideoCapture(useCases)) {
+        if (containsVideoCapture(useCases) && isUseCaseConfigurationFailure(exception)) {
           throw new CameraXError(
               "unsupportedRecordingProfile",
               "CameraX could not bind the requested recording profile.",
@@ -88,6 +89,48 @@ class ProcessCameraProviderProxyApi extends PigeonApiProcessCameraProvider {
 
     throw new IllegalStateException(
         "LifecycleOwner must be set to get ProcessCameraProvider instance.");
+  }
+
+  /**
+   * Message fragments of the {@link IllegalArgumentException}s CameraX throws when the requested
+   * use cases, resolution, quality or frame rate cannot be configured together on the selected
+   * camera (for example "No supported surface combination is found for camera device", "Target FPS
+   * range [60, 60] is not supported", "Unable to find selected quality").
+   */
+  private static final String[] USE_CASE_CONFIGURATION_FAILURE_MARKERS = {
+    "surface combination",
+    "resolution",
+    "quality",
+    "fps range",
+    "frame rate",
+    "session configuration",
+  };
+
+  /**
+   * Whether a bind failure means the requested recording configuration is not supported, which the
+   * caller may answer by trying another profile.
+   *
+   * <p>Other {@link IllegalArgumentException}s (for example "No available camera can be found"
+   * after an external camera was unplugged) are not configuration problems: reporting them as
+   * {@code unsupportedRecordingProfile} would make the caller retry every profile for nothing.
+   */
+  static boolean isUseCaseConfigurationFailure(@NonNull Throwable exception) {
+    for (Throwable cause = exception; cause != null; cause = cause.getCause()) {
+      final String message = cause.getMessage();
+      if (message == null) {
+        continue;
+      }
+      final String normalizedMessage = message.toLowerCase(Locale.ROOT);
+      for (String marker : USE_CASE_CONFIGURATION_FAILURE_MARKERS) {
+        if (normalizedMessage.contains(marker)) {
+          return true;
+        }
+      }
+      if (cause.getCause() == cause) {
+        break;
+      }
+    }
+    return false;
   }
 
   private boolean containsVideoCapture(@NonNull List<? extends UseCase> useCases) {
