@@ -33,6 +33,11 @@
   `stopImageStream` no longer skips releasing the FFI reader, a restarted
   stream does not deliver the previous stream's last frame, torn frames are
   dropped, and a failing `startImageStream` is reported on the stream (#32).
+* Linux: `create` rejects missing `cameraName`/`resolutionPreset` arguments
+  with `invalid_args`, and the recording EOS callback no longer touches a
+  disposed record handler. These Linux changes were not compiled in this
+  change set (no Linux toolchain was available) (#32).
+
 ## 1.2.1
 
 * Adds macOS encoder-validated H.264/HEVC capability metadata and one-shot
