@@ -17,9 +17,13 @@ finalized file. A request is never rewritten simply because a lens needs a
 fallback. Capability discovery is repeated after a camera switch; a profile
 found on one lens is not assumed for another.
 
-Candidate selection is resolution-first, frame-rate-second, and codec-third.
-An HEVC request retries H.264 at the same size and frame rate before reducing
-either dimension. A configured candidate succeeds only when native readback
+Candidate selection for an explicit resolution is resolution-first,
+frame-rate-second, and codec-third; an automatic resolution puts the requested
+frame rate first. An explicit target is never upgraded while the lens has a
+format at or below it; a lens without one uses its closest larger format and
+reports `unsupportedProfile`, so a remembered profile does not make a camera
+switch fail. An HEVC request retries H.264 at the same size and frame rate
+before reducing either dimension. A configured candidate succeeds only when native readback
 matches its width, height, frame rate, and selected codec. Permission, access,
 and unrelated camera failures are errors, not fallbacks.
 
