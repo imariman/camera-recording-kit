@@ -69,7 +69,7 @@ def main():
     flutter = str(flutter_simulator_framework_dir())
     environment = dict(os.environ, SDKROOT=sdk)
 
-    with tempfile.TemporaryDirectory(prefix="teleprompter-ios-camera-tests-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="camera-recording-kit-ios-camera-tests-") as temporary:
         directory = Path(temporary)
         base = [
             "xcrun", "swiftc", "-sdk", sdk,
@@ -87,7 +87,7 @@ def main():
         bundle.mkdir()
         (bundle / "Info.plist").write_bytes(plistlib.dumps({
             "CFBundleExecutable": "CameraTests",
-            "CFBundleIdentifier": "dev.teleprompter.camera-ios-tests",
+            "CFBundleIdentifier": "dev.camera-recording-kit.camera-ios-tests",
             "CFBundlePackageType": "BNDL",
         }))
         run(*base, "-emit-library", "-module-name", "camera_avfoundationTests",
