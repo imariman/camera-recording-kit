@@ -5,6 +5,15 @@
   device cannot be locked for configuration, instead of raising an
   `NSGenericException`. A torch that cannot be turned on at recording start is
   reported through the camera error stream and the recording continues.
+* Validates the selected recording codec against the video output's
+  `availableVideoCodecTypesForAssetWriter(writingTo: .mp4)`. Camera creation
+  fails with `unsupportedRecordingProfile` for an unavailable codec, and
+  starting a recording fails with the same code instead of raising
+  `NSInvalidArgumentException`.
+* `recordingQualityCapabilities` advertises HEVC only when the capture output
+  reports it (VideoToolbox encoder check before camera permission is granted).
+* `recordingQualityApplied` derives `codec` from the writer settings instead
+  of echoing the request, and reports `unknown` when no codec can be resolved.
 
 ## 0.10.2
 

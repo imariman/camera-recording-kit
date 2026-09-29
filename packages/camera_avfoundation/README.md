@@ -22,9 +22,14 @@ most two seconds and reports convergence without changing the lock modes. The
 host applies both locks after a successful result; a timeout or unsupported lock
 returns `false` so the host can retain continuous automatic focus and exposure.
 
-Each exact profile includes encoder-validated H.264/HEVC support.
-Call `setRecordingVideoCodec` before controller creation to select the
-codec used by the next recording configuration.
+Each exact profile lists the codecs it can record. HEVC is only listed when
+the camera's video output reports it among the codecs it can feed to an
+`AVAssetWriter` for MP4 (when camera permission has not been granted yet, a
+VideoToolbox encoder check is used instead). Call `setRecordingVideoCodec`
+before controller creation to select the codec used by the next recording
+configuration. Creating a camera whose output does not offer the selected codec
+fails with `unsupportedRecordingProfile`, and `recordingQualityApplied` reports
+the codec taken from the writer settings rather than the request.
 
 [1]: https://pub.dev/packages/camera
 [2]: https://flutter.dev/to/endorsed-federated-plugin

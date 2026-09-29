@@ -111,7 +111,12 @@ public final class CameraPlugin: NSObject, FlutterPlugin {
       }
       captureSessionQueue.async {
         do {
-          self.replyToRecordingQuality(result, with: .success(try RecordingQuality.capabilities(cameraName: cameraName)))
+          let activeWriterCodecs = self.camera?.writerVideoCodecTypes(forCameraName: cameraName)
+          self.replyToRecordingQuality(
+            result,
+            with: .success(
+              try RecordingQuality.capabilities(
+                cameraName: cameraName, activeWriterCodecs: activeWriterCodecs)))
         } catch {
           self.replyToRecordingQuality(result, with: .failure(error))
         }
@@ -193,7 +198,7 @@ public final class CameraPlugin: NSObject, FlutterPlugin {
   }
 
   private static func pigeonErrorFromNSError(_ error: NSError) -> PigeonError {
-    if error.domain == "dev.teleprompter.recording_quality" && (2...4).contains(error.code) {
+    if error.domain == "dev.teleprompter.recording_quality" && (2...5).contains(error.code) {
       return PigeonError(
         code: "unsupportedRecordingProfile",
         message: error.localizedDescription,

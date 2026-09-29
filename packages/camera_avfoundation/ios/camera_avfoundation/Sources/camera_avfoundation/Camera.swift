@@ -120,6 +120,10 @@ protocol Camera: FlutterTexture, AVCaptureVideoDataOutputSampleBufferDelegate,
   /// Returns the active capture settings represented for the recording-quality channel.
   func recordingQualityApplied() -> [String: Any]
 
+  /// The asset writer codecs this camera's video output reports, when the camera captures from
+  /// the device named `cameraName` and the output knows them; nil otherwise.
+  func writerVideoCodecTypes(forCameraName cameraName: String) -> [AVVideoCodecType]?
+
   /// Waits for auto focus and exposure to settle without changing either mode.
   func waitForRecordingFocus(completion: @escaping (Bool) -> Void)
 

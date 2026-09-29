@@ -26,6 +26,14 @@ protocol CaptureVideoDataOutput: CaptureOutput {
   /// Corresponds to the `videoSettings` property of `AVCaptureVideoDataOutput`
   var videoSettings: [String: Any]! { get set }
 
+  /// Corresponds to the `availableVideoCodecTypesForAssetWriter(writingTo:)` method of
+  /// `AVCaptureVideoDataOutput`: the codecs that may be passed to
+  /// `recommendedVideoSettings(forVideoCodecType:assetWriterOutputFileType:)`.
+  /// The list depends on the session configuration and may be empty until the
+  /// output is connected to a video input.
+  func availableVideoCodecTypesForAssetWriter(writingTo outputFileType: AVFileType)
+    -> [AVVideoCodecType]
+
   /// Corresponds to the `setSampleBufferDelegate` method of `AVCaptureVideoDataOutput`
   func setSampleBufferDelegate(
     _ sampleBufferDelegate: AVCaptureVideoDataOutputSampleBufferDelegate?,

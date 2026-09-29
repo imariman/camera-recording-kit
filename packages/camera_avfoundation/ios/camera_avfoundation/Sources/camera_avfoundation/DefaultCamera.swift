@@ -68,6 +68,8 @@ final class DefaultCamera: NSObject, Camera {
 
   private var videoWriter: AssetWriter?
   private var videoWriterInput: AssetWriterInput?
+  /// The video settings the current (or last) asset writer input was created with.
+  private var writerVideoSettings: [String: Any]?
   private var audioWriterInput: AssetWriterInput?
   private var assetWriterPixelBufferAdaptor: AssetWriterInputPixelBufferAdaptor?
   private var videoAdaptor: AssetWriterInputPixelBufferAdaptor?
@@ -249,6 +251,8 @@ final class DefaultCamera: NSObject, Camera {
       try setCaptureSessionPreset(mediaSettings.resolutionPreset)
     }
 
+    try validateRecordingCodec()
+
     updateOrientation()
 
     // Handle video and audio interruptions and errors. Interruption can happen for example by
@@ -354,6 +358,26 @@ final class DefaultCamera: NSObject, Camera {
     let size = videoDimensionsConverter(captureDevice.flutterActiveFormat)
     previewSize = CGSize(width: CGFloat(size.width), height: CGFloat(size.height))
     audioCaptureSession.sessionPreset = videoCaptureSession.sessionPreset
+  }
+
+  /// Fails camera creation with `unsupportedRecordingProfile` when the video output reports its
+  /// asset writer codecs and the requested one is not among them. An empty list means the output
+  /// cannot tell yet; `setupWriter` checks again once the session runs.
+  private func validateRecordingCodec() throws {
+    let available = captureVideoOutput.availableVideoCodecTypesForAssetWriter(writingTo: .mp4)
+    guard available.isEmpty || available.contains(recordingVideoCodec.avVideoCodecType) else {
+      throw unsupportedCodecError()
+    }
+  }
+
+  private func unsupportedCodecError() -> NSError {
+    return NSError(
+      domain: "dev.teleprompter.recording_quality",
+      code: 5,
+      userInfo: [
+        NSLocalizedDescriptionKey:
+          "The \(recordingVideoCodec.rawValue) video codec is unavailable for recording on this camera."
+      ])
   }
 
   private func exactRecordingResolution(
@@ -605,13 +629,10 @@ final class DefaultCamera: NSObject, Camera {
       return
     }
 
-    guard setupWriter(forPath: videoRecordingPath) else {
-      completion(
-        .failure(
-          PigeonError(
-            code: "IOError",
-            message: "Setup Writer Failed",
-            details: nil)))
+    do {
+      try setupWriter(forPath: videoRecordingPath)
+    } catch {
+      completion(.failure(error))
       return
     }
 
@@ -640,7 +661,22 @@ final class DefaultCamera: NSObject, Camera {
     completion(.success(()))
   }
 
-  private func setupWriter(forPath path: String) -> Bool {
+  /// Recommended writer settings for the configured codec, or nil when the video output does not
+  /// offer that codec for MP4.
+  private func recommendedWriterVideoSettings() -> [String: Any]? {
+    return mediaSettingsAVWrapper.recommendedVideoSettingsForAssetWriter(
+      withVideoCodecType: recordingVideoCodec.avVideoCodecType,
+      fileType: AVFileType.mp4,
+      for: captureVideoOutput)
+  }
+
+  private static let setupWriterFailed = PigeonError(
+    code: "IOError",
+    message: "Setup Writer Failed",
+    details: nil)
+
+  /// Creates the asset writer and its inputs. Throws a `PigeonError` describing the failure.
+  private func setupWriter(forPath path: String) throws {
     setUpCaptureSessionForAudioIfNeeded()
 
     let videoWriter: AssetWriter
@@ -650,15 +686,22 @@ final class DefaultCamera: NSObject, Camera {
       self.videoWriter = videoWriter
     } catch let error as NSError {
       reportErrorMessage(error.description)
-      return false
+      throw DefaultCamera.setupWriterFailed
     }
 
-    guard var videoSettings = mediaSettingsAVWrapper.recommendedVideoSettingsForAssetWriter(
-      withVideoCodecType: recordingVideoCodec.avVideoCodecType,
-      fileType: AVFileType.mp4,
-      for: captureVideoOutput
-    ) else {
-      return false
+    // `recommendedVideoSettings` raises NSInvalidArgumentException for a codec the output does not
+    // list, so the codec is validated against the output before asking for settings.
+    let availableCodecs = captureVideoOutput.availableVideoCodecTypesForAssetWriter(
+      writingTo: .mp4)
+    guard availableCodecs.contains(recordingVideoCodec.avVideoCodecType) else {
+      throw PigeonError(
+        code: "unsupportedRecordingProfile",
+        message: unsupportedCodecError().localizedDescription,
+        details: availableCodecs.map(\.rawValue))
+    }
+
+    guard var videoSettings = recommendedWriterVideoSettings() else {
+      throw DefaultCamera.setupWriterFailed
     }
 
     if mediaSettings.videoBitrate != nil || framesPerSecond != nil {
@@ -677,12 +720,13 @@ final class DefaultCamera: NSObject, Camera {
     }
 
     guard videoWriter.canApply(outputSettings: videoSettings, forMediaType: .video) else {
-      return false
+      throw DefaultCamera.setupWriterFailed
     }
 
     let videoWriterInput = mediaSettingsAVWrapper.assetWriterVideoInput(
       withOutputSettings: videoSettings)
     self.videoWriterInput = videoWriterInput
+    writerVideoSettings = videoSettings
 
     let sourcePixelBufferAttributes: [String: Any] = [
       kCVPixelBufferPixelFormatTypeKey as String: videoFormat
@@ -731,8 +775,6 @@ final class DefaultCamera: NSObject, Camera {
     mediaSettingsAVWrapper.addInput(videoWriterInput, to: videoWriter)
 
     captureVideoOutput.setSampleBufferDelegate(self, queue: captureSessionQueue)
-
-    return true
   }
 
   func pauseVideoRecording() {
@@ -1177,10 +1219,14 @@ final class DefaultCamera: NSObject, Camera {
 
   func recordingQualityApplied() -> [String: Any] {
     let dimensions = videoDimensionsConverter(captureDevice.flutterActiveFormat)
+    // Report the codec the writer uses (or would use), not the request. "unknown" makes the
+    // shared layer reject the profile instead of assuming H.264.
+    let codec = RecordingQuality.VideoCodec(
+      writerSettings: writerVideoSettings ?? recommendedWriterVideoSettings())
     var result: [String: Any] = [
       "width": Int(dimensions.width),
       "height": Int(dimensions.height),
-      "codec": recordingVideoCodec.rawValue,
+      "codec": codec?.rawValue ?? "unknown",
     ]
 
     let duration = captureDevice.activeVideoMinFrameDuration
@@ -1193,6 +1239,12 @@ final class DefaultCamera: NSObject, Camera {
       result["stabilizationEnabled"] = connection.activeVideoStabilizationMode != .off
     }
     return result
+  }
+
+  func writerVideoCodecTypes(forCameraName cameraName: String) -> [AVVideoCodecType]? {
+    guard captureDevice.uniqueID == cameraName else { return nil }
+    let codecs = captureVideoOutput.availableVideoCodecTypesForAssetWriter(writingTo: .mp4)
+    return codecs.isEmpty ? nil : codecs
   }
 
   func waitForRecordingFocus(completion: @escaping (Bool) -> Void) {

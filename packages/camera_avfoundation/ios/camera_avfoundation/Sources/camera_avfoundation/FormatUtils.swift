@@ -9,6 +9,13 @@ import AVFoundation
 typealias VideoDimensionsConverter = (CaptureDeviceFormat) -> CMVideoDimensions
 
 enum FormatUtils {
+  /// Whether `format` can sustain `frameRate`.
+  static func supports(frameRate: Double, on format: CaptureDeviceFormat) -> Bool {
+    return format.flutterVideoSupportedFrameRateRanges.contains {
+      Double($0.minFrameRate) <= frameRate && frameRate <= Double($0.maxFrameRate)
+    }
+  }
+
   /// Finds a format that exactly matches [targetResolution] and can sustain
   /// [targetFrameRate]. Unlike `findBestFormat`, this never substitutes a
   /// nearby frame rate: callers use it for an explicit recording profile.

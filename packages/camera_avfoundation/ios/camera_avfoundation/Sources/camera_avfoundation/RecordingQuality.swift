@@ -1,6 +1,7 @@
 // Copyright 2026 Teleprompter Studio. All rights reserved.
 
 import AVFoundation
+import VideoToolbox
 
 enum RecordingQuality {
   enum VideoCodec: String, CaseIterable {
@@ -11,6 +12,28 @@ enum RecordingQuality {
       switch self {
       case .h264: return .h264
       case .hevc: return .hevc
+      }
+    }
+
+    /// Maps an `AVVideoCodecKey` value from writer settings back to a codec.
+    init?(avVideoCodecType: AVVideoCodecType) {
+      switch avVideoCodecType {
+      case .h264: self = .h264
+      case .hevc: self = .hevc
+      default: return nil
+      }
+    }
+
+    /// Reads the codec from asset writer video settings, or nil when the settings do not
+    /// name one of the supported codecs.
+    init?(writerSettings settings: [String: Any]?) {
+      guard let raw = settings?[AVVideoCodecKey] else { return nil }
+      if let type = raw as? AVVideoCodecType {
+        self.init(avVideoCodecType: type)
+      } else if let string = raw as? String {
+        self.init(avVideoCodecType: AVVideoCodecType(rawValue: string))
+      } else {
+        return nil
       }
     }
   }
@@ -33,18 +56,44 @@ enum RecordingQuality {
     (3840, 2160, [30, 60]),
   ]
 
-  static func capabilities(cameraName: String) throws -> [String: Any] {
+  /// Returns the capabilities of the camera named `cameraName`.
+  ///
+  /// - Parameter activeWriterCodecs: the asset writer codecs reported by the video output of an
+  ///   active camera using the same device, if any. When nil, a temporary, never started capture
+  ///   session is used to ask a video output connected to the device.
+  static func capabilities(
+    cameraName: String,
+    activeWriterCodecs: [AVVideoCodecType]? = nil
+  ) throws -> [String: Any] {
     guard let device = AVCaptureDevice(uniqueID: cameraName) else {
       throw qualityError("Camera '\(cameraName)' is unavailable.")
     }
 
+    let writerCodecs = activeWriterCodecs ?? probeWriterVideoCodecs(for: device)
+    return capabilities(
+      device: device,
+      codecs: availableCodecs(
+        writerCodecs: writerCodecs, encoderAvailable: isEncoderAvailable),
+      videoDimensionsConverter: { CMVideoFormatDescriptionGetDimensions($0.formatDescription) },
+      supportsEncoding: supportsEncoding)
+  }
+
+  /// Builds the capability map from the device formats. Kept free of AVFoundation singletons
+  /// so it can run against fake devices in tests.
+  static func capabilities(
+    device: CaptureDevice,
+    codecs: [VideoCodec],
+    videoDimensionsConverter: VideoDimensionsConverter,
+    supportsEncoding: (_ width: Int32, _ height: Int32, _ fps: Int, _ codec: VideoCodec) -> Bool
+  ) -> [String: Any] {
     var deviceProfiles = Set<Profile>()
-    for format in device.formats {
-      let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+    for format in device.flutterFormats {
+      let dimensions = videoDimensionsConverter(format)
       for requested in requestedProfiles
       where dimensions.width == requested.width && dimensions.height == requested.height
       {
-        for fps in requested.frameRates where supports(frameRate: Double(fps), on: format) {
+        for fps in requested.frameRates
+        where FormatUtils.supports(frameRate: Double(fps), on: format) {
           deviceProfiles.insert(
             Profile(
               width: dimensions.width,
@@ -55,14 +104,11 @@ enum RecordingQuality {
     }
 
     let supportedProfiles = deviceProfiles.compactMap { profile -> SupportedProfile? in
-      let codecs = VideoCodec.allCases.filter {
-        supportsEncoding(
-          width: profile.width,
-          height: profile.height,
-          fps: profile.framesPerSecond,
-          codec: $0)
+      let supportedCodecs = codecs.filter {
+        supportsEncoding(profile.width, profile.height, profile.framesPerSecond, $0)
       }
-      return codecs.isEmpty ? nil : SupportedProfile(profile: profile, codecs: codecs)
+      return supportedCodecs.isEmpty
+        ? nil : SupportedProfile(profile: profile, codecs: supportedCodecs)
     }.sorted {
       if $0.profile.width != $1.profile.width {
         return $0.profile.width < $1.profile.width
@@ -85,6 +131,72 @@ enum RecordingQuality {
       "supportsFocusLock": device.isFocusModeSupported(.locked),
       "supportsExposureLock": device.isExposureModeSupported(.locked),
     ]
+  }
+
+  /// Returns the codecs that may be advertised.
+  ///
+  /// When the capture output reported its asset writer codecs, only those are used: asking
+  /// the output for recommended settings of any other codec raises `NSInvalidArgumentException`.
+  /// When the list is unknown (for example before camera permission was granted), H.264 is kept
+  /// and HEVC requires a hardware/software encoder that VideoToolbox reports; the recording path
+  /// validates the codec against the real output again before writing.
+  static func availableCodecs(
+    writerCodecs: [AVVideoCodecType]?,
+    encoderAvailable: (VideoCodec) -> Bool
+  ) -> [VideoCodec] {
+    if let writerCodecs, !writerCodecs.isEmpty {
+      return VideoCodec.allCases.filter { writerCodecs.contains($0.avVideoCodecType) }
+    }
+    return VideoCodec.allCases.filter { $0 == .h264 || encoderAvailable($0) }
+  }
+
+  /// Asks a video data output connected to `device` which codecs it can feed to an
+  /// `AVAssetWriter` writing MP4. The session is never started, and `.inputPriority` keeps it
+  /// from changing the device's active format. Returns nil when the answer is unavailable.
+  private static func probeWriterVideoCodecs(for device: AVCaptureDevice) -> [AVVideoCodecType]? {
+    guard AVCaptureDevice.authorizationStatus(for: .video) == .authorized,
+      let input = try? AVCaptureDeviceInput(device: device)
+    else {
+      return nil
+    }
+    let session = AVCaptureSession()
+    let output = AVCaptureVideoDataOutput()
+    session.beginConfiguration()
+    session.sessionPreset = .inputPriority
+    guard session.canAddInput(input), session.canAddOutput(output) else {
+      session.commitConfiguration()
+      return nil
+    }
+    session.addInput(input)
+    session.addOutput(output)
+    session.commitConfiguration()
+    defer {
+      session.beginConfiguration()
+      session.removeOutput(output)
+      session.removeInput(input)
+      session.commitConfiguration()
+    }
+    let codecs = output.availableVideoCodecTypesForAssetWriter(writingTo: .mp4)
+    return codecs.isEmpty ? nil : codecs
+  }
+
+  /// Whether VideoToolbox has an encoder for `codec`.
+  private static func isEncoderAvailable(_ codec: VideoCodec) -> Bool {
+    let codecType: CMVideoCodecType
+    switch codec {
+    case .h264: codecType = kCMVideoCodecType_H264
+    case .hevc: codecType = kCMVideoCodecType_HEVC
+    }
+    var encoderID: CFString?
+    var properties: CFDictionary?
+    let status = VTCopySupportedPropertyDictionaryForEncoder(
+      width: 1920,
+      height: 1080,
+      codecType: codecType,
+      encoderSpecification: nil,
+      encoderIDOut: &encoderID,
+      supportedPropertiesOut: &properties)
+    return status == noErr
   }
 
   static func inspectMedia(path: String, completion: @escaping (Result<[String: Any], Error>) -> Void) {
@@ -149,12 +261,6 @@ enum RecordingQuality {
         }
         completion(.success(metadata))
       }
-    }
-  }
-
-  private static func supports(frameRate: Double, on format: AVCaptureDevice.Format) -> Bool {
-    return format.videoSupportedFrameRateRanges.contains {
-      Double($0.minFrameRate) <= frameRate && frameRate <= Double($0.maxFrameRate)
     }
   }
 

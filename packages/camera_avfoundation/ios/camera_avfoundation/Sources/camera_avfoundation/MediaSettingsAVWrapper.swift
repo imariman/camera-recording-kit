@@ -89,12 +89,19 @@ class FLTCamMediaSettingsAVWrapper {
   ///   - fileType: Specifies the UTI of the file type to be written (see AVMediaFormat.h for a list
   ///     of file format UTIs).
   ///   - output: The `FLTCaptureVideoDataOutput` instance.
-  /// - Returns: A fully populated dictionary of keys and values that are compatible with AVAssetWriter.
+  /// - Returns: A fully populated dictionary of keys and values that are compatible with AVAssetWriter,
+  ///   or nil when the output does not offer `videoCodecType` for `fileType`. AVFoundation raises
+  ///   `NSInvalidArgumentException` for such a codec, so it is never passed through.
   func recommendedVideoSettingsForAssetWriter(
     withVideoCodecType videoCodecType: AVVideoCodecType,
     fileType: AVFileType,
     for output: CaptureVideoDataOutput
   ) -> [String: Any]? {
+    guard
+      output.availableVideoCodecTypesForAssetWriter(writingTo: fileType).contains(videoCodecType)
+    else {
+      return nil
+    }
     return output.avOutput.recommendedVideoSettings(
       forVideoCodecType: videoCodecType,
       assetWriterOutputFileType: fileType)
