@@ -16,6 +16,13 @@
   finalizes it before it starts, instead of waiting forever for a start event.
 * Finalize events of an earlier recording (a different output file) are no
   longer taken as the finalize of the current one.
+* Keeps `Preview` and `VideoCapture` bound after `stopVideoRecording` instead
+  of unbinding `VideoCapture`, so `recordingQualityApplied` and
+  `waitForRecordingFocus` keep receiving capture results for the next recording
+  and starting it does not rebuild the session (which could drop a focus lock).
+  `ProcessCameraProvider.unbind` now keeps the recording-quality registration in
+  sync. Needs verification on a physical device with two consecutive
+  recordings.
 
 ## 0.7.4+3
 

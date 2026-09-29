@@ -13,6 +13,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.camera.core.Camera;
 import androidx.camera.core.CameraInfo;
@@ -158,6 +159,26 @@ public class ProcessCameraProviderTest {
     api.unbind(instance, useCases);
 
     verify(instance).unbind(useCases.toArray(new UseCase[] {}));
+  }
+
+  @Test
+  public void unbind_keepsRecordingQualityControllerRegistrationInSync() {
+    final RecordingQualityController controller = mock(RecordingQualityController.class);
+    final PigeonApiProcessCameraProvider api =
+        new TestProxyApiRegistrar() {
+          @NonNull
+          @Override
+          RecordingQualityController getRecordingQualityController() {
+            return controller;
+          }
+        }.getPigeonApiProcessCameraProvider();
+
+    final ProcessCameraProvider instance = mock(ProcessCameraProvider.class);
+    final List<UseCase> useCases = Collections.singletonList(mock(VideoCapture.class));
+    api.unbind(instance, useCases);
+
+    verify(instance).unbind(useCases.toArray(new UseCase[] {}));
+    verify(controller).onUseCasesUnbound(useCases);
   }
 
   @Test

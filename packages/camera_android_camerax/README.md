@@ -45,8 +45,10 @@ Each exact format advertises its codec support. CameraX advertises H.264 only
 because its public Recorder API cannot deterministically select HEVC;
 `setRecordingVideoCodec('hevc')` therefore reports `unsupportedVideoCodec`.
 
-Initialization binds `Preview` and `VideoCapture` together. Still capture and
-image analysis remain available and are bound lazily when requested. Recording
+Initialization binds `Preview` and `VideoCapture` together, and both stay bound
+after a recording stops, so the next recording starts without reconfiguring the
+camera session and the readback above keeps working between recordings. Still
+capture and image analysis remain available and are bound lazily when requested. Recording
 quality selection uses an exact CameraX `QualitySelector`; callers should retry
 their own approved lower profile after `unsupportedRecordingProfile` instead of
 assuming a fallback was applied.

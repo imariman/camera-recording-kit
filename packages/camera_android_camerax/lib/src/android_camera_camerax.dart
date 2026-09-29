@@ -1383,7 +1383,11 @@ class AndroidCameraCameraX extends CameraPlatform {
       );
     }
 
-    await _unbindUseCaseFromLifecycle(videoCapture!);
+    // VideoCapture stays bound (unlike upstream): it was bound with the Preview
+    // at initialize, and its capture callback feeds the recording-quality
+    // readback and waitForRecordingFocus. Unbinding it here would stop those
+    // results and make the next recording rebind it, which reconfigures the
+    // session and can drop a focus lock.
     final videoFile = XFile(videoOutputPath!);
     cameraEventStreamController.add(
       VideoRecordedEvent(cameraId, videoFile, /* duration */ null),

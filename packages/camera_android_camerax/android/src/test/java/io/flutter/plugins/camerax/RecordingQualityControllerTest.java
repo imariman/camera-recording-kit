@@ -7,6 +7,7 @@ package io.flutter.plugins.camerax;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -485,6 +486,92 @@ public class RecordingQualityControllerTest {
     final MethodChannel.Result result = mock(MethodChannel.Result.class);
     controller.onMethodCall(appliedCall(), result);
     verify(result).success(appliedProfile(60, true));
+  }
+
+  @Test
+  public void recordingQualityApplied_keepsWorkingForTheNextRecordingWhileVideoCaptureStaysBound() {
+    final RecordingQualityController.RecordingConvergenceTracker tracker =
+        bindRecordingCamera(30);
+    deliver(
+        tracker,
+        captureResult(new Range<>(30, 30), CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF));
+    final MethodChannel.Result firstRecording = mock(MethodChannel.Result.class);
+    controller.onMethodCall(appliedCall(), firstRecording);
+    verify(firstRecording).success(appliedProfile(30, false));
+
+    // stopVideoRecording no longer unbinds anything, so the session keeps delivering results to
+    // the same tracker and the next recording's readback answers without a rebind.
+    deliver(
+        tracker,
+        captureResult(new Range<>(30, 30), CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF));
+    final MethodChannel.Result secondRecording = mock(MethodChannel.Result.class);
+    controller.onMethodCall(appliedCall(), secondRecording);
+    verify(secondRecording).success(appliedProfile(30, false));
+  }
+
+  @Test
+  public void onUseCasesUnbound_videoCaptureFailsReadbackFastAndStopsFocusTracking() {
+    final RecordingQualityController.RecordingConvergenceTracker tracker =
+        mock(RecordingQualityController.RecordingConvergenceTracker.class);
+    final CameraControl cameraControl = mock(CameraControl.class);
+    final CameraInfo cameraInfo = mock(CameraInfo.class);
+    when(cameraInfo.isFocusMeteringSupported(any())).thenReturn(true);
+    final VideoCapture<Recorder> videoCapture = mockVideoCapture();
+    final Preview preview = mock(Preview.class);
+    controller.registerPreview(preview, CAMERA_ID);
+    controller.registerVideoCapture(videoCapture, tracker);
+    controller.registerBoundCamera(
+        mock(CameraSelector.class),
+        Arrays.<UseCase>asList(preview, videoCapture),
+        mockCamera(cameraControl, cameraInfo));
+
+    controller.onUseCasesUnbound(Collections.singletonList(videoCapture));
+
+    controller.onFocusMeteringStarted(cameraControl);
+    verify(tracker, never()).reset();
+    final MethodChannel.Result focusResult = mock(MethodChannel.Result.class);
+    controller.onMethodCall(cameraIdCall("waitForRecordingFocus"), focusResult);
+    verify(focusResult).success(false);
+    verify(tracker, never()).waitForConvergence(any(), any(), any(), anyLong());
+
+    final MethodChannel.Result appliedResult = mock(MethodChannel.Result.class);
+    controller.onMethodCall(appliedCall(), appliedResult);
+    // Answered at once instead of polling for results that no longer arrive.
+    verify(appliedResult).error(eq("unsupportedRecordingProfile"), anyString(), isNull());
+  }
+
+  @Test
+  public void onUseCasesUnbound_previewOnlyKeepsTheRecordingSession() {
+    final RecordingQualityController.RecordingConvergenceTracker tracker =
+        bindRecordingCamera(30);
+
+    // pausePreview unbinds only the Preview; the VideoCapture and its session stay bound.
+    controller.onUseCasesUnbound(Collections.singletonList(boundPreview));
+    deliver(
+        tracker,
+        captureResult(new Range<>(30, 30), CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF));
+
+    final MethodChannel.Result result = mock(MethodChannel.Result.class);
+    controller.onMethodCall(appliedCall(), result);
+    verify(result).success(appliedProfile(30, false));
+  }
+
+  @Test
+  public void registerBoundCamera_restoresRegistrationWhenUnboundVideoCaptureIsBoundAgain() {
+    final RecordingQualityController.RecordingConvergenceTracker tracker =
+        bindRecordingCamera(30);
+    controller.onUseCasesUnbound(Collections.singletonList(boundVideoCapture));
+
+    // Upstream-style start: VideoCapture bound again on its own.
+    controller.registerBoundCamera(
+        mock(CameraSelector.class), Collections.singletonList(boundVideoCapture), mockCamera());
+    deliver(
+        tracker,
+        captureResult(new Range<>(30, 30), CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF));
+
+    final MethodChannel.Result result = mock(MethodChannel.Result.class);
+    controller.onMethodCall(appliedCall(), result);
+    verify(result).success(appliedProfile(30, false));
   }
 
   @SuppressWarnings("unchecked")

@@ -3521,7 +3521,7 @@ void main() {
       }, throwsA(isA<CameraException>()));
     });
 
-    group('finalize errors', () {
+    group('recording lifecycle', () {
       const outputPath = '/data/cache/REC42.mp4';
       const outputUri = 'file://$outputPath';
 
@@ -3771,6 +3771,36 @@ void main() {
       );
 
       test(
+        'a second recording reuses the bound VideoCapture without rebinding it',
+        () async {
+          final camera = AndroidCameraCameraX();
+          final firstRecording = MockRecording();
+          setUpForStartingRecording(camera, firstRecording);
+          final provider =
+              camera.processCameraProvider! as MockProcessCameraProvider;
+
+          for (var i = 0; i < 2; i++) {
+            AndroidCameraCameraX.videoRecordingEventStreamController.add(
+              VideoRecordEventStart.pigeon_detached(),
+            );
+            await camera.startVideoCapturing(const VideoCaptureOptions(1));
+            AndroidCameraCameraX.videoRecordingEventStreamController.add(
+              VideoRecordEventFinalize.pigeon_detached(
+                error: 0,
+                outputUri: outputUri,
+              ),
+            );
+            expect((await camera.stopVideoRecording(1)).path, outputPath);
+          }
+
+          verify(firstRecording.close()).called(2);
+          verifyNever(provider.unbind(any));
+          verifyNever(provider.unbindAll());
+          verifyNever(provider.bindToLifecycle(any, any));
+        },
+      );
+
+      test(
         'stopVideoRecording cleans up the recording when closing it fails',
         () async {
           final camera = AndroidCameraCameraX();
@@ -3790,7 +3820,7 @@ void main() {
     });
 
     test(
-      'VideoCapture use case is unbound from lifecycle when video recording stops',
+      'VideoCapture use case stays bound to the lifecycle when video recording stops',
       () async {
         final camera = AndroidCameraCameraX();
         final recording = MockRecording();
@@ -3815,7 +3845,8 @@ void main() {
         );
 
         await camera.stopVideoRecording(90);
-        verify(processCameraProvider.unbind(<UseCase>[videoCapture]));
+        verifyNever(processCameraProvider.unbind(any));
+        verifyNever(processCameraProvider.unbindAll());
 
         // Verify that recording stops.
         verify(recording.close());

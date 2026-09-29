@@ -108,6 +108,7 @@ class ProcessCameraProviderProxyApi extends PigeonApiProcessCameraProvider {
   public void unbind(
       ProcessCameraProvider pigeonInstance, @NonNull List<? extends UseCase> useCases) {
     pigeonInstance.unbind(useCases.toArray(new UseCase[0]));
+    getPigeonRegistrar().getRecordingQualityController().onUseCasesUnbound(useCases);
   }
 
   @Override

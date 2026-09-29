@@ -254,6 +254,39 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     cameraControlTrackers.clear();
   }
 
+  /**
+   * Keeps the registration in sync after {@code ProcessCameraProvider.unbind(useCases)}.
+   *
+   * <p>Unbinding a {@link VideoCapture} detaches the capture callback that feeds the
+   * applied-profile readback and the focus wait, so the camera it was bound to no longer has a
+   * recording session: readback fails fast instead of polling results that will not arrive. The
+   * VideoCapture's camera id is kept, so binding it again (with or without a Preview) restores the
+   * registration. Unbinding only a Preview (pausePreview) keeps the recording session, because the
+   * VideoCapture stays bound.
+   */
+  synchronized void onUseCasesUnbound(@NonNull List<? extends UseCase> useCases) {
+    for (Map.Entry<Long, BoundRecordingCamera> entry : boundCameras.entrySet()) {
+      final BoundRecordingCamera boundCamera = entry.getValue();
+      if (boundCamera.videoCapture == null
+          || !containsInstance(useCases, boundCamera.videoCapture)) {
+        continue;
+      }
+      cameraControlTrackers.remove(boundCamera.camera.getCameraControl());
+      entry.setValue(
+          new BoundRecordingCamera(boundCamera.camera, boundCamera.cameraInfo, null, null));
+    }
+  }
+
+  private static boolean containsInstance(
+      @NonNull List<? extends UseCase> useCases, @NonNull UseCase useCase) {
+    for (UseCase candidate : useCases) {
+      if (candidate == useCase) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   @Override
   public void onMethodCall(@NonNull MethodCall call, @NonNull MethodChannel.Result result) {
     try {
