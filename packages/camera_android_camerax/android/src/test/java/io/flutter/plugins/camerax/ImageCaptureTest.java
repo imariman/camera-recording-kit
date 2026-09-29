@@ -21,6 +21,7 @@ import androidx.camera.core.resolutionselector.ResolutionSelector;
 import java.io.File;
 import java.io.IOException;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import kotlin.Result;
 import kotlin.Unit;
 import kotlin.jvm.functions.Function1;
@@ -250,6 +251,32 @@ public class ImageCaptureTest {
           .onCameraError("The camera framework failed to fulfill the image capture request.");
       assertEquals(result[0], captureException);
     }
+  }
+
+  @Test
+  public void shutDownAfterCallback_shutsDownExecutorAfterImageSaved() {
+    final ImageCapture.OnImageSavedCallback callback =
+        mock(ImageCapture.OnImageSavedCallback.class);
+    final ExecutorService executor = mock(ExecutorService.class);
+    final ImageCapture.OutputFileResults results = mock(ImageCapture.OutputFileResults.class);
+
+    ImageCaptureProxyApi.shutDownAfterCallback(callback, executor).onImageSaved(results);
+
+    verify(callback).onImageSaved(results);
+    verify(executor).shutdown();
+  }
+
+  @Test
+  public void shutDownAfterCallback_shutsDownExecutorAfterError() {
+    final ImageCapture.OnImageSavedCallback callback =
+        mock(ImageCapture.OnImageSavedCallback.class);
+    final ExecutorService executor = mock(ExecutorService.class);
+    final ImageCaptureException exception = mock(ImageCaptureException.class);
+
+    ImageCaptureProxyApi.shutDownAfterCallback(callback, executor).onError(exception);
+
+    verify(callback).onError(exception);
+    verify(executor).shutdown();
   }
 
   @Test

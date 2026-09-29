@@ -85,32 +85,40 @@ void main() {
     await expectLater(setRecordingVideoCodec('vp9'), throwsArgumentError);
   });
 
-  test('recordingQualityApplied preserves nullable applied values', () async {
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(channel, (MethodCall call) async {
-          expect(call.method, 'recordingQualityApplied');
-          expect(call.arguments, <String, Object?>{'cameraId': 42});
-          return <String, Object?>{
-            'width': 1280,
-            'height': 720,
-            'fps': null,
-            'stabilizationEnabled': null,
-            'codec': null,
-            'codecSource': 'unavailableUntilFinalized',
-          };
-        });
+  test(
+    'recordingQualityApplied returns the native readback with a pending codec',
+    () async {
+      // Shape of the map RecordingQualityController returns: fps and
+      // stabilization always come from the CaptureResult readback, and only
+      // the codec is unknown until the recording is finalized.
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+            expect(call.method, 'recordingQualityApplied');
+            expect(call.arguments, <String, Object?>{'cameraId': 42});
+            return <String, Object?>{
+              'width': 1280,
+              'height': 720,
+              'fps': 60,
+              'stabilizationEnabled': true,
+              'codec': null,
+              'codecSource': 'unavailableUntilFinalized',
+            };
+          });
 
-    final result = await recordingQualityApplied(42);
+      final result = await recordingQualityApplied(42);
 
-    expect(result, <String, Object?>{
-      'width': 1280,
-      'height': 720,
-      'fps': null,
-      'stabilizationEnabled': null,
-      'codec': null,
-      'codecSource': 'unavailableUntilFinalized',
-    });
-  });
+      expect(result, <String, Object?>{
+        'width': 1280,
+        'height': 720,
+        'fps': 60,
+        'stabilizationEnabled': true,
+        'codec': null,
+        'codecSource': 'unavailableUntilFinalized',
+      });
+      expect(result['fps'], isA<int>());
+      expect(result['stabilizationEnabled'], isA<bool>());
+    },
+  );
 
   test('inspectRecordingMedia forwards finalized path', () async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

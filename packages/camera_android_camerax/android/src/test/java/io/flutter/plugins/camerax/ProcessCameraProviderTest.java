@@ -13,6 +13,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.camera.core.Camera;
 import androidx.camera.core.CameraInfo;
@@ -135,6 +136,70 @@ public class ProcessCameraProviderTest {
   }
 
   @Test
+  public void bindToLifecycle_reportsUnsupportedRecordingProfileForCameraXConfigurationMessages() {
+    final String[] configurationMessages = {
+      "No supported surface combination is found for camera device - Id : 0. May be the specified"
+          + " resolution is too large and not supported.",
+      "Target FPS range [60, 60] is not supported. Max FPS supported by the calculated best"
+          + " combination: 30",
+      "Unable to find selected quality",
+      "No intersected frame rate can be found from the target frame rate settings of the UseCases!",
+      "Failed to find supported resolutions.",
+    };
+    for (String message : configurationMessages) {
+      final CameraXError error =
+          assertThrows(
+              message,
+              CameraXError.class,
+              () -> bindVideoCaptureFailingWith(new IllegalArgumentException(message)));
+      assertEquals(message, "unsupportedRecordingProfile", error.getCode());
+    }
+  }
+
+  @Test
+  public void bindToLifecycle_reportsUnsupportedRecordingProfileForConfigurationCause() {
+    final CameraXError error =
+        assertThrows(
+            CameraXError.class,
+            () ->
+                bindVideoCaptureFailingWith(
+                    new IllegalArgumentException(
+                        "Bind failed", new RuntimeException("Can't find any supported quality"))));
+
+    assertEquals("unsupportedRecordingProfile", error.getCode());
+  }
+
+  @Test
+  public void bindToLifecycle_keepsUnrelatedIllegalArgumentExceptionAsGenericError() {
+    final IllegalArgumentException noCamera =
+        new IllegalArgumentException("No available camera can be found. [] []");
+
+    final IllegalArgumentException thrown =
+        assertThrows(
+            IllegalArgumentException.class, () -> bindVideoCaptureFailingWith(noCamera));
+
+    assertEquals(noCamera, thrown);
+  }
+
+  private static void bindVideoCaptureFailingWith(IllegalArgumentException exception) {
+    final PigeonApiProcessCameraProvider api =
+        new TestProxyApiRegistrar() {
+          @Nullable
+          @Override
+          public LifecycleOwner getLifecycleOwner() {
+            return mock(LifecycleOwner.class);
+          }
+        }.getPigeonApiProcessCameraProvider();
+    final ProcessCameraProvider instance = mock(ProcessCameraProvider.class);
+    final CameraSelector cameraSelector = mock(CameraSelector.class);
+    final List<UseCase> useCases = Collections.singletonList(mock(VideoCapture.class));
+    when(instance.bindToLifecycle(any(), eq(cameraSelector), any(UseCase[].class)))
+        .thenThrow(exception);
+
+    api.bindToLifecycle(instance, cameraSelector, useCases);
+  }
+
+  @Test
   public void isBound_returnsExpectedIsBound() {
     final PigeonApiProcessCameraProvider api =
         new TestProxyApiRegistrar().getPigeonApiProcessCameraProvider();
@@ -158,6 +223,26 @@ public class ProcessCameraProviderTest {
     api.unbind(instance, useCases);
 
     verify(instance).unbind(useCases.toArray(new UseCase[] {}));
+  }
+
+  @Test
+  public void unbind_keepsRecordingQualityControllerRegistrationInSync() {
+    final RecordingQualityController controller = mock(RecordingQualityController.class);
+    final PigeonApiProcessCameraProvider api =
+        new TestProxyApiRegistrar() {
+          @NonNull
+          @Override
+          RecordingQualityController getRecordingQualityController() {
+            return controller;
+          }
+        }.getPigeonApiProcessCameraProvider();
+
+    final ProcessCameraProvider instance = mock(ProcessCameraProvider.class);
+    final List<UseCase> useCases = Collections.singletonList(mock(VideoCapture.class));
+    api.unbind(instance, useCases);
+
+    verify(instance).unbind(useCases.toArray(new UseCase[] {}));
+    verify(controller).onUseCasesUnbound(useCases);
   }
 
   @Test

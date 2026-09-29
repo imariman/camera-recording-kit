@@ -41,10 +41,14 @@ Import `package:camera_android_camerax/recording_quality.dart` to query the
 Android recording backend directly:
 
 * `recordingQualityCapabilities(cameraName)` returns only 30/60 FPS SDR
-  combinations verified against CameraX recording qualities, a containing
-  camera frame-rate range, per-size sensor duration, CameraX encoder profiles,
-  and installed encoder size/rate constraints. It also reports native
-  focus-lock and exposure-lock support for that camera name.
+  combinations verified against CameraX recording qualities, a fixed
+  `[fps, fps]` camera frame-rate range (the same range the preview requests and
+  `recordingQualityApplied` requires; a variable range such as `[15, 60]` is not
+  enough), per-size sensor duration, an H.264 CameraX encoder profile, and the
+  size/rate limits of an installed hardware H.264 encoder (software encoders
+  count only on devices without one). Capabilities are built off the main
+  thread. It also reports native focus-lock and exposure-lock support for that
+  camera name.
 * `recordingQualityApplied(cameraId)` reads the resolution from the bound
   `VideoCapture`, and the frame rate and stabilization state from the latest
   Camera2 `CaptureResult` (`CONTROL_AE_TARGET_FPS_RANGE` and
@@ -58,17 +62,23 @@ Android recording backend directly:
   converge. It does not submit a new metering request or lock focus; callers
   may apply their requested lock only after convergence succeeds.
 * `inspectRecordingMedia(path)` reads finalized MP4 container and track
-  metadata without decoding video frames.
+  metadata without decoding video frames. `mimeType` is the container type
+  (`video/mp4`), as on iOS and macOS; `codec` comes from the video track.
 
 Each exact format advertises its codec support. CameraX advertises H.264 only
 because its public Recorder API cannot deterministically select HEVC;
 `setRecordingVideoCodec('hevc')` therefore reports `unsupportedVideoCodec`.
 
-Initialization binds `Preview` and `VideoCapture` together. Still capture and
-image analysis remain available and are bound lazily when requested. Recording
+Initialization binds `Preview` and `VideoCapture` together, and both stay bound
+after a recording stops, so the next recording starts without reconfiguring the
+camera session and the readback above keeps working between recordings. Still
+capture and image analysis remain available and are bound lazily when requested. Recording
 quality selection uses an exact CameraX `QualitySelector`; callers should retry
 their own approved lower profile after `unsupportedRecordingProfile` instead of
-assuming a fallback was applied.
+assuming a fallback was applied. Binding reports `unsupportedRecordingProfile`
+only when CameraX rejects the use-case configuration (surface combination,
+resolution, quality or frame rate); other failures, such as a camera that is no
+longer available, are reported as errors.
 
 ## Limitations
 

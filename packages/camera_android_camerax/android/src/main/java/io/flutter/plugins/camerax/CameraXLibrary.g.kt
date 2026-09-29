@@ -445,9 +445,7 @@ abstract class CameraXLibraryPigeonProxyApiRegistrar(val binaryMessenger: Binary
    * An implementation of [PigeonApiVideoRecordEventFinalize] used to add a new Dart instance of
    * `VideoRecordEventFinalize` to the Dart `InstanceManager`.
    */
-  open fun getPigeonApiVideoRecordEventFinalize(): PigeonApiVideoRecordEventFinalize {
-    return PigeonApiVideoRecordEventFinalize(this)
-  }
+  abstract fun getPigeonApiVideoRecordEventFinalize(): PigeonApiVideoRecordEventFinalize
 
   /**
    * An implementation of [PigeonApiMeteringPoint] used to add a new Dart instance of
@@ -1940,9 +1938,28 @@ open class PigeonApiVideoRecordEventStart(
  * See https://developer.android.com/reference/androidx/camera/video/VideoRecordEvent.Finalize.
  */
 @Suppress("UNCHECKED_CAST")
-open class PigeonApiVideoRecordEventFinalize(
+abstract class PigeonApiVideoRecordEventFinalize(
     open val pigeonRegistrar: CameraXLibraryPigeonProxyApiRegistrar
 ) {
+  /**
+   * The error type of the finalized recording.
+   *
+   * One of the `VideoRecordEvent.Finalize.ERROR_*` constants, or `ERROR_NONE` (0) when the
+   * recording finished without error.
+   *
+   * See
+   * https://developer.android.com/reference/androidx/camera/video/VideoRecordEvent.Finalize#getError().
+   */
+  abstract fun error(pigeon_instance: androidx.camera.video.VideoRecordEvent.Finalize): Long
+
+  /**
+   * The URI of the recording output, or null if CameraX reported an empty URI (for example when no
+   * output was written).
+   *
+   * See https://developer.android.com/reference/androidx/camera/video/OutputResults#getOutputUri().
+   */
+  abstract fun outputUri(pigeon_instance: androidx.camera.video.VideoRecordEvent.Finalize): String?
+
   @Suppress("LocalVariableName", "FunctionName")
   /**
    * Creates a Dart instance of VideoRecordEventFinalize and attaches it to [pigeon_instanceArg].
@@ -1960,12 +1977,14 @@ open class PigeonApiVideoRecordEventFinalize(
     } else {
       val pigeon_identifierArg =
           pigeonRegistrar.instanceManager.addHostCreatedInstance(pigeon_instanceArg)
+      val errorArg = error(pigeon_instanceArg)
+      val outputUriArg = outputUri(pigeon_instanceArg)
       val binaryMessenger = pigeonRegistrar.binaryMessenger
       val codec = pigeonRegistrar.codec
       val channelName =
           "dev.flutter.pigeon.camera_android_camerax.VideoRecordEventFinalize.pigeon_newInstance"
       val channel = BasicMessageChannel<Any?>(binaryMessenger, channelName, codec)
-      channel.send(listOf(pigeon_identifierArg)) {
+      channel.send(listOf(pigeon_identifierArg, errorArg, outputUriArg)) {
         if (it is List<*>) {
           if (it.size > 1) {
             callback(

@@ -11,6 +11,7 @@ import androidx.camera.core.ImageCaptureException;
 import androidx.camera.core.resolutionselector.ResolutionSelector;
 import java.io.File;
 import java.io.IOException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import kotlin.Result;
 import kotlin.Unit;
@@ -105,8 +106,42 @@ class ImageCaptureProxyApi extends PigeonApiImageCapture {
     final ImageCapture.OnImageSavedCallback onImageSavedCallback =
         createOnImageSavedCallback(temporaryCaptureFile, systemServicesManager, callback);
 
-    pigeonInstance.takePicture(
-        outputFileOptions, Executors.newSingleThreadExecutor(), onImageSavedCallback);
+    // One executor per request delivers its single callback; shut it down afterwards so repeated
+    // captures do not leak threads.
+    final ExecutorService callbackExecutor = Executors.newSingleThreadExecutor();
+    try {
+      pigeonInstance.takePicture(
+          outputFileOptions,
+          callbackExecutor,
+          shutDownAfterCallback(onImageSavedCallback, callbackExecutor));
+    } catch (RuntimeException exception) {
+      callbackExecutor.shutdown();
+      throw exception;
+    }
+  }
+
+  @NonNull
+  static ImageCapture.OnImageSavedCallback shutDownAfterCallback(
+      @NonNull ImageCapture.OnImageSavedCallback callback, @NonNull ExecutorService executor) {
+    return new ImageCapture.OnImageSavedCallback() {
+      @Override
+      public void onImageSaved(@NonNull ImageCapture.OutputFileResults outputFileResults) {
+        try {
+          callback.onImageSaved(outputFileResults);
+        } finally {
+          executor.shutdown();
+        }
+      }
+
+      @Override
+      public void onError(@NonNull ImageCaptureException exception) {
+        try {
+          callback.onError(exception);
+        } finally {
+          executor.shutdown();
+        }
+      }
+    };
   }
 
   @Override

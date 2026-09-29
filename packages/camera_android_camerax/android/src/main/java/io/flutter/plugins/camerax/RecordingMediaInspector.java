@@ -13,6 +13,7 @@ import androidx.annotation.Nullable;
 import java.io.File;
 import java.io.IOException;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 /** Reads finalized recording container metadata without decoding media samples. */
@@ -52,10 +53,12 @@ final class RecordingMediaInspector {
           firstInteger(
               extractInteger(retriever, MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION),
               getInteger(videoFormat, MediaFormat.KEY_ROTATION));
+      // mimeType describes the container, like the iOS and macOS backends; the
+      // codec comes from the video track only.
       final String mimeType =
           firstString(
-              getString(videoFormat, MediaFormat.KEY_MIME),
-              retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE));
+              retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE),
+              containerMimeTypeFromExtension(file));
 
       Number fps = null;
       String fpsSource = "nominal";
@@ -97,7 +100,7 @@ final class RecordingMediaInspector {
       metadata.put("fpsSource", fpsSource);
       metadata.put("bitrate", bitrate);
       metadata.put("bitrateSource", bitrateSource);
-      metadata.put("codec", codecName(videoFormat, mimeType));
+      metadata.put("codec", codecName(videoFormat));
       metadata.put("mimeType", mimeType);
       metadata.put("fileSizeBytes", file.length());
       return metadata;
@@ -128,21 +131,40 @@ final class RecordingMediaInspector {
     return null;
   }
 
+  /**
+   * Returns the codec of the video track: its RFC 6381 codecs string when available (for example
+   * {@code avc1.640028}), otherwise the subtype of the track MIME type (for example {@code avc}).
+   * Returns null without a video track rather than falling back to the container type.
+   */
   @Nullable
-  private String codecName(@Nullable MediaFormat format, @Nullable String mimeType) {
+  private String codecName(@Nullable MediaFormat videoFormat) {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-      final String codecs = getString(format, MediaFormat.KEY_CODECS_STRING);
+      final String codecs = getString(videoFormat, MediaFormat.KEY_CODECS_STRING);
       if (codecs != null && !codecs.isEmpty()) {
         return codecs;
       }
     }
-    if (mimeType == null) {
+    final String trackMimeType = getString(videoFormat, MediaFormat.KEY_MIME);
+    if (trackMimeType == null) {
       return null;
     }
-    final int separator = mimeType.indexOf('/');
-    return separator >= 0 && separator + 1 < mimeType.length()
-        ? mimeType.substring(separator + 1)
-        : mimeType;
+    final int separator = trackMimeType.indexOf('/');
+    return separator >= 0 && separator + 1 < trackMimeType.length()
+        ? trackMimeType.substring(separator + 1)
+        : trackMimeType;
+  }
+
+  /** Container MIME type derived from the file extension, matching the iOS and macOS backends. */
+  @NonNull
+  private static String containerMimeTypeFromExtension(@NonNull File file) {
+    final String name = file.getName().toLowerCase(Locale.ROOT);
+    if (name.endsWith(".mov")) {
+      return "video/quicktime";
+    }
+    if (name.endsWith(".m4v")) {
+      return "video/x-m4v";
+    }
+    return "video/mp4";
   }
 
   @Nullable

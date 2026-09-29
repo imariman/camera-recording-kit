@@ -1,3 +1,75 @@
+## Unreleased
+
+* Resets per-camera focus, exposure, flash/torch, capture-orientation lock and
+  paused-preview state when a camera is created or disposed, so a setting made
+  on a previous camera no longer makes the same call a no-op on the next one.
+* Reports the CameraX finalize error code and output URI with
+  `VideoRecordEventFinalize`. `stopVideoRecording` now throws a
+  `CameraException` (code `videoRecordingFailed`, message naming the CameraX
+  error code) when a recording is finalized with an error that leaves no usable
+  file, such as `ERROR_INSUFFICIENT_STORAGE` or `ERROR_NO_VALID_DATA`, instead
+  of returning it as a successful recording. A recording finalized with
+  `ERROR_SOURCE_INACTIVE` (camera closed, for example by the activity lifecycle
+  when the app goes to the background) or a size/duration limit is still
+  returned, because CameraX writes a playable file in those cases.
+* `startVideoCapturing` now throws and clears the recording when CameraX
+  finalizes it before it starts, instead of waiting forever for a start event.
+* Finalize events of an earlier recording (a different output file) are no
+  longer taken as the finalize of the current one.
+* Keeps `Preview` and `VideoCapture` bound after `stopVideoRecording` instead
+  of unbinding `VideoCapture`, so `recordingQualityApplied` and
+  `waitForRecordingFocus` keep receiving capture results for the next recording
+  and starting it does not rebuild the session (which could drop a focus lock).
+  `ProcessCameraProvider.unbind` now keeps the recording-quality registration in
+  sync. Needs verification on a physical device with two consecutive
+  recordings.
+* `dispose` now closes a recording that is still active (for example after a
+  failed stop), clears the recording state and drops queued recording events,
+  so the next camera's `startVideoCapturing` no longer silently no-ops and a
+  later stop cannot return the previous recording's file. A stop still waiting
+  for its finalize event when the camera is disposed now fails instead of
+  waiting forever.
+* `setDescriptionWhileRecording` is atomic: if the new lens cannot bind the use
+  cases, the previous lens is bound again and the camera selector, facing and
+  sensor orientation stay unchanged before the error is rethrown.
+* `startVideoCapturing` sets the `VideoCapture` target rotation on every
+  recording (the locked capture orientation, otherwise the current display
+  rotation). The rotation was previously frozen at bind time, so a device
+  rotated after initialization recorded with the wrong rotation hint.
+* A failure of the `unbindAll` issued while creating a camera is reported on the
+  camera error stream instead of being dropped.
+* `inspectRecordingMedia` reports the container MIME type (`video/mp4`) as
+  `mimeType`, matching iOS and macOS, instead of the video track MIME type, and
+  no longer falls back to the container subtype (`mp4`) as `codec` when the file
+  has no video track.
+* Only bind failures caused by an unsupported use-case configuration (surface
+  combination, resolution, quality or frame rate) are reported as
+  `unsupportedRecordingProfile`. Other `IllegalArgumentException`s, such as a
+  missing (unplugged) camera, stay generic errors instead of making callers try
+  every lower profile.
+* Shuts down the single-thread executor created for each preview surface request
+  and each `takePicture` once its result was delivered, so repeated preview
+  rebinds and captures no longer leak threads.
+* `recordingQualityCapabilities` builds its result on a background executor
+  (still answering on the main thread) and enumerates the installed codecs once
+  instead of once per quality, frame rate and profile, which janked camera
+  initialization and camera switches on low-end devices.
+* `recordingQualityCapabilities` advertises a frame rate only when the camera
+  offers the fixed `[fps, fps]` range, the same condition
+  `recordingQualityApplied` checks, instead of any range containing it (a device
+  with only `[15, 60]` advertised 60 fps and then rejected it after two
+  seconds).
+* `recordingQualityCapabilities` counts only H.264 (`video/avc`) encoder
+  profiles, so a size whose only profile is HEVC is no longer advertised as
+  `h264`, and checks hardware encoders (software encoders only on devices
+  without a hardware H.264 encoder).
+* Detaching the plugin answers pending `recordingQualityApplied` calls with a
+  `recordingQualityFailure` error and pending `waitForRecordingFocus` calls with
+  `false` instead of leaving them unanswered, and `inspectRecordingMedia` after
+  detaching reports an error instead of throwing. Camera infos of selectors and
+  focus tracking of camera controls that are no longer bound are released on
+  rebind instead of only on detach.
+
 ## 0.7.4+3
 
 * Adds exact-format codec capability metadata and explicit rejection when

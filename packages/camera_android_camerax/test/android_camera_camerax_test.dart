@@ -2505,6 +2505,209 @@ void main() {
     },
   );
 
+  group('per-camera state', () {
+    const testCameraDescription = CameraDescription(
+      name: 'cameraName',
+      lensDirection: CameraLensDirection.back,
+      sensorOrientation: 90,
+    );
+
+    late AndroidCameraCameraX camera;
+    late MockCameraControl mockCameraControl;
+
+    setUp(() {
+      camera = AndroidCameraCameraX();
+      mockCameraControl = MockCameraControl();
+      final mockProcessCameraProvider = MockProcessCameraProvider();
+      final mockCamera = MockCamera();
+      final mockCameraInfo = MockCameraInfo();
+      final mockFocusMeteringResult = MockFocusMeteringResult();
+
+      setUpOverridesForTestingUseCaseConfiguration(mockProcessCameraProvider);
+      setUpOverridesForSettingFocusandExposurePoints(
+        mockCameraControl,
+        MockCamera2CameraControl(),
+      );
+
+      when(
+        mockProcessCameraProvider.bindToLifecycle(any, any),
+      ).thenAnswer((_) async => mockCamera);
+      when(mockCamera.getCameraInfo()).thenAnswer((_) async => mockCameraInfo);
+      when(mockCamera.cameraControl).thenReturn(mockCameraControl);
+      when(
+        mockCameraInfo.getCameraState(),
+      ).thenAnswer((_) async => MockLiveCameraState());
+      when(mockFocusMeteringResult.isFocusSuccessful).thenReturn(true);
+      when(
+        mockCameraControl.startFocusAndMetering(any),
+      ).thenAnswer((_) async => mockFocusMeteringResult);
+    });
+
+    Future<int> createAndInitializeCamera() async {
+      final int cameraId = await camera.createCameraWithSettings(
+        testCameraDescription,
+        const MediaSettings(),
+      );
+      await camera.initializeCamera(cameraId);
+      return cameraId;
+    }
+
+    /// Locks focus, turns the torch on and locks the capture orientation.
+    Future<void> changeStateOnCamera(int cameraId) async {
+      await camera.setFocusMode(cameraId, FocusMode.locked);
+      await camera.setFlashMode(cameraId, FlashMode.torch);
+      await camera.lockCaptureOrientation(
+        cameraId,
+        DeviceOrientation.landscapeLeft,
+      );
+      expect(camera.torchEnabled, isTrue);
+      expect(camera.captureOrientationLocked, isTrue);
+      expect(camera.shouldSetDefaultRotation, isTrue);
+      expect(camera.currentFocusMeteringAction, isNotNull);
+    }
+
+    /// Verifies the second camera starts from defaults and that the setters
+    /// short-circuited by stale state actually apply again.
+    Future<void> expectSecondCameraStartsFromDefaults(int cameraId) async {
+      expect(camera.torchEnabled, isFalse);
+      expect(camera.captureOrientationLocked, isFalse);
+      expect(camera.shouldSetDefaultRotation, isFalse);
+      expect(camera.currentFocusMeteringAction, isNull);
+
+      clearInteractions(mockCameraControl);
+      await camera.setFocusMode(cameraId, FocusMode.locked);
+      final FocusMeteringAction lockedAction =
+          verify(
+                mockCameraControl.startFocusAndMetering(captureAny),
+              ).captured.single
+              as FocusMeteringAction;
+      expect(lockedAction.isAutoCancelEnabled, isFalse);
+
+      await camera.setFlashMode(cameraId, FlashMode.torch);
+      verify(mockCameraControl.enableTorch(true));
+    }
+
+    test(
+      'createCamera resets state left by a previous camera that was not disposed',
+      () async {
+        await changeStateOnCamera(await createAndInitializeCamera());
+
+        await expectSecondCameraStartsFromDefaults(
+          await createAndInitializeCamera(),
+        );
+      },
+    );
+
+    test(
+      'setDescriptionWhileRecording keeps the current camera when the new lens cannot be bound',
+      () async {
+        final previousSelector = MockCameraSelector();
+        final rejectedSelector = MockCameraSelector();
+        final selectors = <CameraSelector>[previousSelector, rejectedSelector];
+        PigeonOverrides.cameraSelector_new =
+            ({LensFacing? requireLensFacing, dynamic cameraInfoForFilter}) =>
+                selectors.removeAt(0);
+
+        await createAndInitializeCamera();
+        final provider =
+            camera.processCameraProvider! as MockProcessCameraProvider;
+        final reboundCamera = MockCamera();
+        final reboundCameraInfo = MockCameraInfo();
+        when(
+          reboundCamera.getCameraInfo(),
+        ).thenAnswer((_) async => reboundCameraInfo);
+        when(reboundCamera.cameraControl).thenReturn(MockCameraControl());
+        when(
+          reboundCameraInfo.getCameraState(),
+        ).thenAnswer((_) async => MockLiveCameraState());
+        when(provider.bindToLifecycle(any, any)).thenAnswer((
+          Invocation invocation,
+        ) async {
+          if (invocation.positionalArguments.first == rejectedSelector) {
+            throw PlatformException(code: 'unsupportedRecordingProfile');
+          }
+          return reboundCamera;
+        });
+        camera.recording = MockRecording();
+        final bool wasFrontFacing = camera.cameraIsFrontFacing;
+        final double previousSensorOrientation =
+            camera.sensorOrientationDegrees;
+
+        await expectLater(
+          camera.setDescriptionWhileRecording(
+            const CameraDescription(
+              name: 'front',
+              lensDirection: CameraLensDirection.front,
+              sensorOrientation: 270,
+            ),
+          ),
+          throwsA(
+            isA<PlatformException>().having(
+              (PlatformException e) => e.code,
+              'code',
+              'unsupportedRecordingProfile',
+            ),
+          ),
+        );
+
+        // The previous lens is bound again with the same use cases.
+        final List<Object?> rebind = verify(
+          provider.bindToLifecycle(previousSelector, captureAny),
+        ).captured;
+        expect(rebind.last, <UseCase>[camera.videoCapture!, camera.preview!]);
+        expect(camera.camera, reboundCamera);
+        expect(camera.cameraInfo, reboundCameraInfo);
+        expect(camera.cameraSelector, previousSelector);
+        expect(camera.cameraIsFrontFacing, wasFrontFacing);
+        expect(camera.sensorOrientationDegrees, previousSensorOrientation);
+      },
+    );
+
+    test(
+      'createCamera reports a failure of the preceding unbindAll instead of dropping it',
+      () async {
+        final errors = <String>[];
+        final StreamSubscription<String> subscription = AndroidCameraCameraX
+            .cameraErrorStreamController
+            .stream
+            .listen(errors.add);
+        final provider = MockProcessCameraProvider();
+        camera.processCameraProvider = provider;
+        when(
+          provider.unbindAll(),
+        ).thenAnswer((_) async => throw PlatformException(code: 'error'));
+
+        await camera.createCameraWithSettings(
+          testCameraDescription,
+          const MediaSettings(),
+        );
+        await Future<void>.delayed(Duration.zero);
+
+        expect(
+          errors,
+          contains(
+            startsWith('Unbinding the previous camera use cases failed'),
+          ),
+        );
+        await subscription.cancel();
+      },
+    );
+
+    test('dispose resets per-camera state before the next camera', () async {
+      final int firstCameraId = await createAndInitializeCamera();
+      await changeStateOnCamera(firstCameraId);
+
+      await camera.dispose(firstCameraId);
+      expect(camera.torchEnabled, isFalse);
+      expect(camera.captureOrientationLocked, isFalse);
+      expect(camera.currentFocusMeteringAction, isNull);
+
+      await expectSecondCameraStartsFromDefaults(
+        await createAndInitializeCamera(),
+      );
+    });
+  });
+
   test('onCameraInitialized stream emits CameraInitializedEvents', () async {
     final camera = AndroidCameraCameraX();
     const cameraId = 16;
@@ -2806,8 +3009,12 @@ void main() {
         camera.imageAnalysis = MockImageAnalysis();
         camera.enableRecordingAudio = enableAudio;
 
-        // Ignore setting target rotation for this test; tested separately.
-        camera.captureOrientationLocked = true;
+        // Target rotation is refreshed on every start; tested separately.
+        PigeonOverrides.deviceOrientationManager_new =
+            ({
+              required void Function(DeviceOrientationManager, String)
+              onDeviceOrientationChanged,
+            }) => MockDeviceOrientationManager();
 
         // Tell plugin to create detached Observer when camera info updated.
         const outputPath = '/temp/REC123.mp4';
@@ -2932,8 +3139,12 @@ void main() {
         camera.imageAnalysis = MockImageAnalysis();
         camera.enableRecordingAudio = false;
 
-        // Ignore setting target rotation for this test; tested seprately.
-        camera.captureOrientationLocked = true;
+        // Target rotation is refreshed on every start; tested separately.
+        PigeonOverrides.deviceOrientationManager_new =
+            ({
+              required void Function(DeviceOrientationManager, String)
+              onDeviceOrientationChanged,
+            }) => MockDeviceOrientationManager();
 
         // Tell plugin to create detached Observer when camera info updated.
         const outputPath = '/temp/REC123.mp4';
@@ -3058,8 +3269,12 @@ void main() {
         camera.imageCapture = MockImageCapture();
         camera.enableRecordingAudio = true;
 
-        // Ignore setting target rotation for this test; tested seprately.
-        camera.captureOrientationLocked = true;
+        // Target rotation is refreshed on every start; tested separately.
+        PigeonOverrides.deviceOrientationManager_new =
+            ({
+              required void Function(DeviceOrientationManager, String)
+              onDeviceOrientationChanged,
+            }) => MockDeviceOrientationManager();
 
         // Tell plugin to create detached Analyzer for testing.
         const outputPath = '/temp/REC123.mp4';
@@ -3147,7 +3362,7 @@ void main() {
     );
 
     test(
-      'startVideoCapturing sets VideoCapture target rotation to current video orientation if orientation unlocked',
+      'startVideoCapturing refreshes the VideoCapture target rotation on every start',
       () async {
         // Set up mocks and constants.
         final camera = AndroidCameraCameraX();
@@ -3156,7 +3371,7 @@ void main() {
         final mockVideoCapture = MockVideoCapture();
         final initialCameraInfo = MockCameraInfo();
         final mockCamera2CameraInfo = MockCamera2CameraInfo();
-        const int defaultTargetRotation = Surface.rotation270;
+        var displayRotation = Surface.rotation0;
 
         // Set directly for test versus calling createCamera.
         camera.processCameraProvider = MockProcessCameraProvider();
@@ -3165,6 +3380,7 @@ void main() {
         camera.videoCapture = mockVideoCapture;
         camera.cameraSelector = MockCameraSelector();
         camera.imageAnalysis = MockImageAnalysis();
+        camera.imageCapture = MockImageCapture();
         camera.cameraInfo = initialCameraInfo;
         camera.enableRecordingAudio = false;
 
@@ -3201,7 +3417,7 @@ void main() {
                   MockDeviceOrientationManager();
               when(
                 mockDeviceOrientationManager.getDefaultDisplayRotation(),
-              ).thenAnswer((_) async => defaultTargetRotation);
+              ).thenAnswer((_) async => displayRotation);
               return mockDeviceOrientationManager;
             };
         PigeonOverrides.videoRecordEventListener_new =
@@ -3239,54 +3455,46 @@ void main() {
           mockCamera2CameraInfo.getCameraCharacteristic(any),
         ).thenAnswer((_) async => InfoSupportedHardwareLevel.limited);
 
-        // Simulate video recording being started so startVideoRecording completes.
-        AndroidCameraCameraX.videoRecordingEventStreamController.add(
-          VideoRecordEventStart.pigeon_detached(),
+        Future<void> startRecording() async {
+          // Simulate video recording being started so startVideoRecording
+          // completes.
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventStart.pigeon_detached(),
+          );
+          camera.recording = null;
+          await camera.startVideoCapturing(const VideoCaptureOptions(cameraId));
+        }
+
+        // Unlocked: the current display rotation is applied.
+        await startRecording();
+        verify(mockVideoCapture.setTargetRotation(Surface.rotation0)).called(1);
+
+        // VideoCapture stays bound between recordings, so a display rotation
+        // change after it was bound must reach the next recording.
+        displayRotation = Surface.rotation90;
+        await startRecording();
+        verify(
+          mockVideoCapture.setTargetRotation(Surface.rotation90),
+        ).called(1);
+
+        // Locked: the locked rotation wins over the display rotation.
+        await camera.lockCaptureOrientation(
+          cameraId,
+          DeviceOrientation.landscapeRight,
         );
+        clearInteractions(mockVideoCapture);
+        await startRecording();
+        verify(
+          mockVideoCapture.setTargetRotation(Surface.rotation270),
+        ).called(1);
+        verifyNever(mockVideoCapture.setTargetRotation(Surface.rotation90));
 
-        // Orientation is unlocked and plugin does not need to set default target
-        // rotation manually.
-        camera.recording = null;
-        await camera.startVideoCapturing(const VideoCaptureOptions(cameraId));
-        verifyNever(mockVideoCapture.setTargetRotation(any));
-
-        // Simulate video recording being started so startVideoRecording completes.
-        AndroidCameraCameraX.videoRecordingEventStreamController.add(
-          VideoRecordEventStart.pigeon_detached(),
-        );
-
-        // Orientation is locked and plugin does not need to set default target
-        // rotation manually.
-        camera.recording = null;
-        camera.captureOrientationLocked = true;
-        await camera.startVideoCapturing(const VideoCaptureOptions(cameraId));
-        verifyNever(mockVideoCapture.setTargetRotation(any));
-
-        // Simulate video recording being started so startVideoRecording completes.
-        AndroidCameraCameraX.videoRecordingEventStreamController.add(
-          VideoRecordEventStart.pigeon_detached(),
-        );
-
-        // Orientation is locked and plugin does need to set default target
-        // rotation manually.
-        camera.recording = null;
-        camera.captureOrientationLocked = true;
-        camera.shouldSetDefaultRotation = true;
-        await camera.startVideoCapturing(const VideoCaptureOptions(cameraId));
-        verifyNever(mockVideoCapture.setTargetRotation(any));
-
-        // Simulate video recording being started so startVideoRecording completes.
-        AndroidCameraCameraX.videoRecordingEventStreamController.add(
-          VideoRecordEventStart.pigeon_detached(),
-        );
-
-        // Orientation is unlocked and plugin does need to set default target
-        // rotation manually.
-        camera.recording = null;
-        camera.captureOrientationLocked = false;
-        camera.shouldSetDefaultRotation = true;
-        await camera.startVideoCapturing(const VideoCaptureOptions(cameraId));
-        verify(mockVideoCapture.setTargetRotation(defaultTargetRotation));
+        // Unlocked again: back to the display rotation.
+        await camera.unlockCaptureOrientation(cameraId);
+        await startRecording();
+        verify(
+          mockVideoCapture.setTargetRotation(Surface.rotation90),
+        ).called(1);
       },
     );
 
@@ -3334,7 +3542,7 @@ void main() {
 
       // Simulate video recording being finalized so stopVideoRecording completes.
       AndroidCameraCameraX.videoRecordingEventStreamController.add(
-        VideoRecordEventFinalize.pigeon_detached(),
+        VideoRecordEventFinalize.pigeon_detached(error: 0),
       );
 
       final XFile file = await camera.stopVideoRecording(0);
@@ -3379,7 +3587,7 @@ void main() {
       await expectLater(() async {
         // Simulate video recording being finalized so stopVideoRecording completes.
         AndroidCameraCameraX.videoRecordingEventStreamController.add(
-          VideoRecordEventFinalize.pigeon_detached(),
+          VideoRecordEventFinalize.pigeon_detached(error: 0),
         );
         await camera.stopVideoRecording(0);
       }, throwsA(isA<CameraException>()));
@@ -3402,7 +3610,7 @@ void main() {
 
       // Simulate video recording being finalized so stopVideoRecording completes.
       AndroidCameraCameraX.videoRecordingEventStreamController.add(
-        VideoRecordEventFinalize.pigeon_detached(),
+        VideoRecordEventFinalize.pigeon_detached(error: 0),
       );
 
       final XFile file = await camera.stopVideoRecording(0);
@@ -3413,8 +3621,379 @@ void main() {
       }, throwsA(isA<CameraException>()));
     });
 
+    group('recording lifecycle', () {
+      const outputPath = '/data/cache/REC42.mp4';
+      const outputUri = 'file://$outputPath';
+
+      Matcher throwsRecordingFailure(String description) => throwsA(
+        isA<CameraException>()
+            .having(
+              (CameraException e) => e.code,
+              'code',
+              AndroidCameraCameraX.videoRecordingFailedErrorCode,
+            )
+            .having(
+              (CameraException e) => e.description,
+              'description',
+              contains(description),
+            ),
+      );
+
+      /// Sets up [camera] so [AndroidCameraCameraX.startVideoCapturing]
+      /// starts [recording] written to [outputPath].
+      void setUpForStartingRecording(
+        AndroidCameraCameraX camera,
+        Recording recording,
+      ) {
+        final mockPendingRecording = MockPendingRecording();
+        camera.processCameraProvider = MockProcessCameraProvider();
+        camera.recorder = MockRecorder();
+        camera.videoCapture = MockVideoCapture();
+        camera.cameraSelector = MockCameraSelector();
+        camera.imageAnalysis = MockImageAnalysis();
+        camera.enableRecordingAudio = false;
+
+        PigeonOverrides.systemServicesManager_new =
+            ({
+              required void Function(SystemServicesManager, String)
+              onCameraError,
+            }) {
+              final mockSystemServicesManager = MockSystemServicesManager();
+              when(
+                mockSystemServicesManager.getTempFilePath(
+                  camera.videoPrefix,
+                  '.mp4',
+                ),
+              ).thenAnswer((_) async => outputPath);
+              return mockSystemServicesManager;
+            };
+        PigeonOverrides.deviceOrientationManager_new =
+            ({
+              required void Function(DeviceOrientationManager, String)
+              onDeviceOrientationChanged,
+            }) => MockDeviceOrientationManager();
+        PigeonOverrides.videoRecordEventListener_new =
+            ({
+              required void Function(VideoRecordEventListener, VideoRecordEvent)
+              onEvent,
+            }) {
+              return VideoRecordEventListener.pigeon_detached(onEvent: onEvent);
+            };
+
+        when(
+          camera.recorder!.prepareRecording(outputPath),
+        ).thenAnswer((_) async => mockPendingRecording);
+        when(
+          mockPendingRecording.asPersistentRecording(),
+        ).thenAnswer((_) async => mockPendingRecording);
+        when(
+          mockPendingRecording.withAudioEnabled(any),
+        ).thenAnswer((_) async => mockPendingRecording);
+        when(
+          mockPendingRecording.start(any),
+        ).thenAnswer((_) async => recording);
+        when(
+          camera.processCameraProvider!.isBound(camera.videoCapture!),
+        ).thenAnswer((_) async => true);
+        when(
+          camera.processCameraProvider!.isBound(camera.imageAnalysis!),
+        ).thenAnswer((_) async => false);
+      }
+
+      /// Sets up [camera] as if a recording to [outputPath] is in progress.
+      MockRecording setUpActiveRecording(AndroidCameraCameraX camera) {
+        final recording = MockRecording();
+        camera.processCameraProvider = MockProcessCameraProvider();
+        camera.videoCapture = MockVideoCapture();
+        camera.recording = recording;
+        camera.pendingRecording = MockPendingRecording();
+        camera.videoOutputPath = outputPath;
+        return recording;
+      }
+
+      test(
+        'startVideoCapturing throws and clears the recording when it is finalized before it starts',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpForStartingRecording(camera, MockRecording());
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(
+              error: 7,
+              outputUri: outputUri,
+            ),
+          );
+
+          await expectLater(
+            camera.startVideoCapturing(const VideoCaptureOptions(1)),
+            throwsRecordingFailure('error code 7 (ERROR_RECORDER_ERROR)'),
+          );
+          expect(camera.recording, isNull);
+          expect(camera.pendingRecording, isNull);
+          expect(camera.videoOutputPath, isNull);
+        },
+      );
+
+      test(
+        'startVideoCapturing throws when a finalize without output URI arrives before start',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpForStartingRecording(camera, MockRecording());
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(error: 4),
+          );
+
+          await expectLater(
+            camera.startVideoCapturing(const VideoCaptureOptions(1)),
+            throwsRecordingFailure('error code 4 (ERROR_SOURCE_INACTIVE)'),
+          );
+          expect(camera.recording, isNull);
+          expect(camera.pendingRecording, isNull);
+        },
+      );
+
+      test(
+        'startVideoCapturing ignores a finalize of an earlier recording',
+        () async {
+          final camera = AndroidCameraCameraX();
+          final recording = MockRecording();
+          setUpForStartingRecording(camera, recording);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController
+            ..add(
+              VideoRecordEventFinalize.pigeon_detached(
+                error: 4,
+                outputUri: 'file:///data/cache/REC41.mp4',
+              ),
+            )
+            ..add(VideoRecordEventStart.pigeon_detached());
+
+          await camera.startVideoCapturing(const VideoCaptureOptions(1));
+
+          expect(camera.recording, recording);
+          expect(camera.videoOutputPath, outputPath);
+        },
+      );
+
+      test(
+        'stopVideoRecording throws with the error code and cleans up when the recording is finalized with an error',
+        () async {
+          final camera = AndroidCameraCameraX();
+          final MockRecording recording = setUpActiveRecording(camera);
+          final recordedEvents = <VideoRecordedEvent>[];
+          final StreamSubscription<VideoRecordedEvent> subscription = camera
+              .onVideoRecordedEvent(0)
+              .listen(recordedEvents.add);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(
+              error: 3,
+              outputUri: outputUri,
+            ),
+          );
+
+          await expectLater(
+            camera.stopVideoRecording(0),
+            throwsRecordingFailure('error code 3 (ERROR_INSUFFICIENT_STORAGE)'),
+          );
+          verify(recording.close());
+          expect(camera.recording, isNull);
+          expect(camera.pendingRecording, isNull);
+          await Future<void>.delayed(Duration.zero);
+          expect(recordedEvents, isEmpty);
+          await subscription.cancel();
+        },
+      );
+
+      test(
+        'stopVideoRecording throws for a recording without valid data',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpActiveRecording(camera);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(error: 8),
+          );
+
+          await expectLater(
+            camera.stopVideoRecording(0),
+            throwsRecordingFailure('error code 8 (ERROR_NO_VALID_DATA)'),
+          );
+          expect(camera.recording, isNull);
+        },
+      );
+
+      test(
+        'stopVideoRecording returns the file of a recording finalized because its source became inactive',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpActiveRecording(camera);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(
+              error: 4,
+              outputUri: outputUri,
+            ),
+          );
+
+          final XFile file = await camera.stopVideoRecording(0);
+
+          expect(file.path, outputPath);
+          expect(camera.recording, isNull);
+        },
+      );
+
+      test(
+        'stopVideoRecording skips a finalize of an earlier recording',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpActiveRecording(camera);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController
+            ..add(
+              VideoRecordEventFinalize.pigeon_detached(
+                error: 3,
+                outputUri: 'file:///data/cache/REC41.mp4',
+              ),
+            )
+            ..add(
+              VideoRecordEventFinalize.pigeon_detached(
+                error: 0,
+                outputUri: outputUri,
+              ),
+            );
+
+          final XFile file = await camera.stopVideoRecording(0);
+
+          expect(file.path, outputPath);
+        },
+      );
+
+      test(
+        'a second recording reuses the bound VideoCapture without rebinding it',
+        () async {
+          final camera = AndroidCameraCameraX();
+          final firstRecording = MockRecording();
+          setUpForStartingRecording(camera, firstRecording);
+          final provider =
+              camera.processCameraProvider! as MockProcessCameraProvider;
+
+          for (var i = 0; i < 2; i++) {
+            AndroidCameraCameraX.videoRecordingEventStreamController.add(
+              VideoRecordEventStart.pigeon_detached(),
+            );
+            await camera.startVideoCapturing(const VideoCaptureOptions(1));
+            AndroidCameraCameraX.videoRecordingEventStreamController.add(
+              VideoRecordEventFinalize.pigeon_detached(
+                error: 0,
+                outputUri: outputUri,
+              ),
+            );
+            expect((await camera.stopVideoRecording(1)).path, outputPath);
+          }
+
+          verify(firstRecording.close()).called(2);
+          verifyNever(provider.unbind(any));
+          verifyNever(provider.unbindAll());
+          verifyNever(provider.bindToLifecycle(any, any));
+        },
+      );
+
+      test(
+        'dispose closes an active recording, clears its state and drops its queued events',
+        () async {
+          final camera = AndroidCameraCameraX();
+          final MockRecording abandoned = setUpActiveRecording(camera);
+          setUpForStartingRecording(camera, MockRecording());
+          camera
+            ..recording = abandoned
+            ..pendingRecording = MockPendingRecording()
+            ..videoOutputPath = '/data/cache/REC41.mp4';
+
+          AndroidCameraCameraX.videoRecordingEventStreamController
+            ..add(
+              VideoRecordEventFinalize.pigeon_detached(
+                error: 4,
+                outputUri: 'file:///data/cache/REC41.mp4',
+              ),
+            )
+            // A stray event of the abandoned recording that must not reach
+            // the next one.
+            ..add(VideoRecordEventStart.pigeon_detached());
+          final StreamQueue<VideoRecordEvent> queueBeforeDispose =
+              camera.videoRecordingEventStreamQueue;
+
+          await camera.dispose(1);
+
+          verify(abandoned.close());
+          expect(camera.recording, isNull);
+          expect(camera.pendingRecording, isNull);
+          expect(camera.videoOutputPath, isNull);
+          expect(
+            camera.videoRecordingEventStreamQueue,
+            isNot(same(queueBeforeDispose)),
+          );
+
+          // The next recording actually starts (instead of silently no-oping
+          // on the stale `recording`) and waits for its own Start event.
+          final next = MockRecording();
+          setUpForStartingRecording(camera, next);
+          var started = false;
+          final Future<void> start = camera
+              .startVideoCapturing(const VideoCaptureOptions(1))
+              .then((_) => started = true);
+          await Future<void>.delayed(Duration.zero);
+          expect(started, isFalse);
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventStart.pigeon_detached(),
+          );
+          await start;
+          expect(camera.recording, next);
+          expect(camera.videoOutputPath, outputPath);
+        },
+      );
+
+      test(
+        'dispose unblocks a stopVideoRecording whose Finalize never arrives',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpForStartingRecording(camera, MockRecording());
+          final MockRecording recording = setUpActiveRecording(camera);
+
+          final Future<void> stop = expectLater(
+            camera.stopVideoRecording(1),
+            throwsRecordingFailure('disposed'),
+          );
+          await camera.dispose(1);
+          await stop;
+
+          verify(recording.close()).called(2);
+          expect(camera.recording, isNull);
+        },
+      );
+
+      test(
+        'stopVideoRecording cleans up the recording when closing it fails',
+        () async {
+          final camera = AndroidCameraCameraX();
+          final MockRecording recording = setUpActiveRecording(camera);
+          when(
+            recording.close(),
+          ).thenThrow(PlatformException(code: 'channel-error'));
+
+          await expectLater(
+            camera.stopVideoRecording(0),
+            throwsA(isA<PlatformException>()),
+          );
+          expect(camera.recording, isNull);
+          expect(camera.pendingRecording, isNull);
+        },
+      );
+    });
+
     test(
-      'VideoCapture use case is unbound from lifecycle when video recording stops',
+      'VideoCapture use case stays bound to the lifecycle when video recording stops',
       () async {
         final camera = AndroidCameraCameraX();
         final recording = MockRecording();
@@ -3435,11 +4014,12 @@ void main() {
 
         // Simulate video recording being finalized so stopVideoRecording completes.
         AndroidCameraCameraX.videoRecordingEventStreamController.add(
-          VideoRecordEventFinalize.pigeon_detached(),
+          VideoRecordEventFinalize.pigeon_detached(error: 0),
         );
 
         await camera.stopVideoRecording(90);
-        verify(processCameraProvider.unbind(<UseCase>[videoCapture]));
+        verifyNever(processCameraProvider.unbind(any));
+        verifyNever(processCameraProvider.unbindAll());
 
         // Verify that recording stops.
         verify(recording.close());
@@ -6877,8 +7457,12 @@ void main() {
       camera.imageAnalysis = MockImageAnalysis();
       camera.enableRecordingAudio = true;
 
-      // Ignore setting target rotation for this test; tested seprately.
-      camera.captureOrientationLocked = true;
+      // Target rotation is refreshed on every start; tested separately.
+      PigeonOverrides.deviceOrientationManager_new =
+          ({
+            required void Function(DeviceOrientationManager, String)
+            onDeviceOrientationChanged,
+          }) => MockDeviceOrientationManager();
 
       // Tell plugin to create detached Observer when camera info updated.
       const outputPath = '/temp/REC123.mp4';
