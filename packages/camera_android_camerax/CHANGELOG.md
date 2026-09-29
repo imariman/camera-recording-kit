@@ -38,6 +38,10 @@
   rotated after initialization recorded with the wrong rotation hint.
 * A failure of the `unbindAll` issued while creating a camera is reported on the
   camera error stream instead of being dropped.
+* `inspectRecordingMedia` reports the container MIME type (`video/mp4`) as
+  `mimeType`, matching iOS and macOS, instead of the video track MIME type, and
+  no longer falls back to the container subtype (`mp4`) as `codec` when the file
+  has no video track.
 
 ## 0.7.4+3
 

@@ -39,7 +39,8 @@ Android recording backend directly:
   converge. It does not submit a new metering request or lock focus; callers
   may apply their requested lock only after convergence succeeds.
 * `inspectRecordingMedia(path)` reads finalized MP4 container and track
-  metadata without decoding video frames.
+  metadata without decoding video frames. `mimeType` is the container type
+  (`video/mp4`), as on iOS and macOS; `codec` comes from the video track.
 
 Each exact format advertises its codec support. CameraX advertises H.264 only
 because its public Recorder API cannot deterministically select HEVC;
