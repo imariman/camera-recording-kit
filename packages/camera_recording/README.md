@@ -96,6 +96,12 @@ old controller does not prevent the switch or its recovery.
 the finalized file runs outside the queue, so a following `release()` or
 `dispose()` is not delayed by it.
 
+A stop the platform rejects (for example an Android recording finalized
+without a usable file) is rethrown by `stopRecording()` and
+`finishRecording()`. The native recording has ended by then, so the service
+stops reporting it as active: `startRecording()`, `switchCamera()` and
+`applyRecordingProfile()` work again without releasing the camera.
+
 ## Backends without quality selection
 
 With a custom `controllerFactory`, or on hosts without a quality backend such

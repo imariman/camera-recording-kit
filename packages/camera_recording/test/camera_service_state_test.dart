@@ -344,6 +344,98 @@ void main() {
     }
   });
 
+  group('terminal stop failure', () {
+    // The real CameraController clears isRecordingVideo only after a
+    // successful platform stop; the fake gateway throws before touching the
+    // controller, which reproduces a native finalize error exactly.
+    final terminal = CameraException(
+      'videoRecordingFailed',
+      'The recording was finalized with error code 8 (ERROR_NO_VALID_DATA) '
+          'and left no usable file.',
+    );
+
+    for (final viaFinish in [false, true]) {
+      final label = viaFinish ? 'finishRecording' : 'stopRecording';
+
+      test('$label rethrows and the service can record again', () async {
+        final gateway = QualityFakeGateway()..stopError = terminal;
+        final service = serviceFor(gateway);
+        await service.initialize(front: true);
+        expect(await service.startRecording(), isTrue);
+        final controller = gateway.factory.createdControllers.last;
+
+        await expectLater(
+          viaFinish ? service.finishRecording() : service.stopRecording(),
+          throwsA(same(terminal)),
+        );
+
+        expect(gateway.stops, 1);
+        expect(service.isRecording, isFalse);
+        expect(controller.value.isRecordingVideo, isFalse);
+        expect(controller.value.isRecordingPaused, isFalse);
+        expect(service.controller, same(controller));
+        expect(service.isInitialized, isTrue);
+
+        gateway.stopError = null;
+        expect(await service.startRecording(), isTrue);
+        expect(gateway.starts, 2);
+        expect(
+          (await service.stopRecording())?.path,
+          '/tmp/quality-original.mp4',
+        );
+        expect(gateway.stops, 2);
+      });
+    }
+
+    test('a paused recording is reconciled as well', () async {
+      final gateway = QualityFakeGateway()..stopError = terminal;
+      final service = serviceFor(gateway);
+      await service.initialize(front: true);
+      expect(await service.startRecording(), isTrue);
+      await service.pauseRecording();
+      expect(service.isRecordingPaused, isTrue);
+
+      await expectLater(service.stopRecording(), throwsA(same(terminal)));
+
+      expect(service.isRecording, isFalse);
+      expect(service.isRecordingPaused, isFalse);
+    });
+
+    test(
+      'switchCamera and applyRecordingProfile work after the failure',
+      () async {
+        final gateway = QualityFakeGateway()..stopError = terminal;
+        final service = serviceFor(gateway);
+        await service.initialize(front: true);
+        expect(await service.startRecording(), isTrue);
+        await expectLater(service.stopRecording(), throwsA(same(terminal)));
+
+        expect(await service.switchCamera(), isNotNull);
+        expect(service.selectedCamera, back);
+        expect(
+          await service.applyRecordingProfile(
+            const RecordingProfile(resolution: RecordingResolution.hd),
+          ),
+          isTrue,
+        );
+        expect(service.appliedProfile?.format.shortSide, 720);
+      },
+    );
+
+    test('a non-camera error leaves the controller state alone', () async {
+      // Only a platform reply proves the native recording ended.
+      final gateway = QualityFakeGateway()
+        ..stopError = StateError('gateway bug');
+      final service = serviceFor(gateway);
+      await service.initialize(front: true);
+      expect(await service.startRecording(), isTrue);
+
+      await expectLater(service.stopRecording(), throwsA(isA<StateError>()));
+
+      expect(service.isRecording, isTrue);
+    });
+  });
+
   test('finishRecording inspection does not hold release()', () async {
     final gate = Completer<void>();
     final gateway = QualityFakeGateway()..inspectionGate = gate;

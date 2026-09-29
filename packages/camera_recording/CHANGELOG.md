@@ -1,5 +1,9 @@
 ## Unreleased
 
+* A stop rejected by the platform (for example an Android recording finalized
+  without a usable file) no longer leaves the service reporting an active
+  recording: `stopRecording()`/`finishRecording()` rethrow the error and the
+  camera can record, switch or change profile again without a release.
 * An exactly applied explicit 480p profile no longer reports
   `fallbackReason: 'unsupportedProfile'`; a sub-HD result for an automatic
   resolution is not a fallback either (#28).

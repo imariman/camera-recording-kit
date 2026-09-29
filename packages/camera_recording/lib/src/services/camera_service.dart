@@ -884,15 +884,43 @@ class CameraService {
   }
 
   /// Stops recording and returns the temporary file; saving to the gallery is the caller's responsibility.
+  ///
+  /// A stop the platform rejects (for example a recording finalized without a
+  /// usable file) is rethrown, and the service no longer reports an active
+  /// recording afterwards, so the camera can record or switch again.
   Future<XFile?> stopRecording() async {
     if (_disposeRequested) return null;
     return _enqueue(() async {
       final controller = _controller;
       if (controller == null || !controller.value.isRecordingVideo) return null;
-      final file = await _gateway.stop(controller);
+      final file = await _stopInQueue(controller);
       await _applyPendingStabilization(controller);
       return file;
     });
+  }
+
+  /// Stops the controller's recording, reconciling its state when the stop
+  /// fails. Must run inside the operation queue.
+  ///
+  /// `CameraController.stopVideoRecording` clears `isRecordingVideo` only
+  /// after a successful platform reply. Every backend has already ended the
+  /// native recording when it reports a stop failure (a finalize error, a
+  /// writer that could not finish), so leaving the flag set would make the
+  /// service refuse to record, switch cameras or change the profile until the
+  /// camera is released. The controller is reconciled before the failure is
+  /// propagated.
+  Future<XFile> _stopInQueue(CameraController controller) async {
+    try {
+      return await _gateway.stop(controller);
+    } on CameraException {
+      if (controller.value.isRecordingVideo) {
+        controller.value = controller.value.copyWith(
+          isRecordingVideo: false,
+          isRecordingPaused: false,
+        );
+      }
+      rethrow;
+    }
   }
 
   /// Finalize once, then inspect the original file without risking its ownership.
@@ -907,7 +935,7 @@ class CameraService {
       final controller = _controller;
       if (controller == null || !controller.value.isRecordingVideo) return null;
       final capture = _captureProfile;
-      final file = await _gateway.stop(controller);
+      final file = await _stopInQueue(controller);
       await _applyPendingStabilization(controller);
       return (file: file, capture: capture);
     });
@@ -1002,7 +1030,7 @@ class CameraService {
     if (controller.value.isRecordingVideo) {
       final capture = _captureProfile;
       try {
-        final file = await _gateway.stop(controller);
+        final file = await _stopInQueue(controller);
         interrupted = RecordingResult(
           file: file,
           mediaMetadata: _withCaptureContext(null, capture),
