@@ -29,9 +29,17 @@ java_bin="java"
 if [[ -n "${JAVA_HOME:-}" ]]; then
   java_bin="$JAVA_HOME/bin/java"
 fi
-java_major="$("$java_bin" -version 2>&1 | awk -F'"' '/version/ {split($2, v, "."); print (v[1] == "1") ? v[2] : v[1]; exit}')"
-if [[ -z "$java_major" || "$java_major" -lt 17 ]]; then
-  echo "error: JDK 17 or newer is required (found '$java_major'). Set JAVA_HOME." >&2
+# `java -version` fails (and would abort the script under `set -e`) when java
+# is missing or JAVA_HOME is invalid, so tolerate the failure and report it.
+java_version="$("$java_bin" -version 2>&1 | awk -F'"' '/version/ {split($2, v, "."); print (v[1] == "1") ? v[2] : v[1]; exit}')" || true
+# Keep only the leading digits so early-access builds such as `25-ea` parse.
+java_major="${java_version%%[!0-9]*}"
+if [[ -z "$java_major" ]]; then
+  echo "error: JDK 17 or newer is required, but no usable java was found at '$java_bin'. Set JAVA_HOME." >&2
+  exit 1
+fi
+if (( java_major < 17 )); then
+  echo "error: JDK 17 or newer is required (found '$java_version' at '$java_bin'). Set JAVA_HOME." >&2
   exit 1
 fi
 
@@ -56,6 +64,12 @@ if [[ ! -f "$host_dir/pubspec.yaml" ]]; then
     --org io.flutter.plugins \
     --no-pub \
     "$host_dir" >/dev/null
+fi
+
+# A reused host dir can exist without the dependency, for example when a
+# previous `flutter pub add` failed, so check the pubspec rather than the dir.
+if ! grep -Eq "^[[:space:]]+$package_name:" "$host_dir/pubspec.yaml"; then
+  echo "==> Adding $package_name path dependency to the host app"
   (
     cd "$host_dir"
     flutter pub add "$package_name:{\"path\":\"$package_dir\"}" >/dev/null

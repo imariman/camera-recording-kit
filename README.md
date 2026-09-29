@@ -64,9 +64,12 @@ See [architecture](docs/ARCHITECTURE.md), [quality and physical QA](docs/QUALITY
 
 Run `tool/validate.sh` from the repository root. It analyzes and tests every
 package sequentially. On a developer Mac it uses `mobile-slot` when available;
-CI runs the same Flutter commands directly. macOS additionally runs native
-synthetic tests when Xcode is available. Hardware acceptance remains a release
-gate and is not replaced by automation.
+CI runs the same Flutter commands directly. On macOS, `tool/validate.sh` then
+runs the native synthetic tests (`tool/test_macos_camera_native.py`), which
+require full Xcode selected with `xcode-select`; with only the Command Line
+Tools, or on another OS, it prints a skip line instead. CI runs the native
+tests in a separate macOS job. Hardware acceptance remains a release gate and
+is not replaced by automation.
 
 The Android JVM (Robolectric/Mockito) unit tests of `camera_android_camerax`
 are not part of `tool/validate.sh` because the package has no Gradle host of

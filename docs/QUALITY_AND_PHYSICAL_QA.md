@@ -26,7 +26,9 @@ policies unavailable to CameraX or AVFoundation.
 `tool/test_macos_camera_native.py` compiles and runs synthetic XCTest coverage
 against the native writer and image-processing code without a Flutter app or a
 physical camera. It requires macOS, full Xcode selected by `xcode-select`, and
-the macOS SDK. It is deliberately skipped on non-macOS hosts.
+the macOS SDK; run directly, it exits with an error on other hosts or with only
+the Command Line Tools. `tool/validate.sh` checks for full Xcode and skips it
+with a message when it is unavailable.
 
 Synthetic tests exercise media finalization and Vision/Core Image behavior;
 they do not establish webcam support, permission handling, visual quality, or
