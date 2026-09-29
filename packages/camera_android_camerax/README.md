@@ -22,10 +22,14 @@ Import `package:camera_android_camerax/recording_quality.dart` to query the
 Android recording backend directly:
 
 * `recordingQualityCapabilities(cameraName)` returns only 30/60 FPS SDR
-  combinations verified against CameraX recording qualities, a containing
-  camera frame-rate range, per-size sensor duration, CameraX encoder profiles,
-  and installed encoder size/rate constraints. It also reports native
-  focus-lock and exposure-lock support for that camera name.
+  combinations verified against CameraX recording qualities, a fixed
+  `[fps, fps]` camera frame-rate range (the same range the preview requests and
+  `recordingQualityApplied` requires; a variable range such as `[15, 60]` is not
+  enough), per-size sensor duration, an H.264 CameraX encoder profile, and the
+  size/rate limits of an installed hardware H.264 encoder (software encoders
+  count only on devices without one). Capabilities are built off the main
+  thread. It also reports native focus-lock and exposure-lock support for that
+  camera name.
 * `recordingQualityApplied(cameraId)` reads the resolution from the bound
   `VideoCapture`, and the frame rate and stabilization state from the latest
   Camera2 `CaptureResult` (`CONTROL_AE_TARGET_FPS_RANGE` and

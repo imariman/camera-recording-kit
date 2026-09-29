@@ -50,6 +50,25 @@
 * Shuts down the single-thread executor created for each preview surface request
   and each `takePicture` once its result was delivered, so repeated preview
   rebinds and captures no longer leak threads.
+* `recordingQualityCapabilities` builds its result on a background executor
+  (still answering on the main thread) and enumerates the installed codecs once
+  instead of once per quality, frame rate and profile, which janked camera
+  initialization and camera switches on low-end devices.
+* `recordingQualityCapabilities` advertises a frame rate only when the camera
+  offers the fixed `[fps, fps]` range, the same condition
+  `recordingQualityApplied` checks, instead of any range containing it (a device
+  with only `[15, 60]` advertised 60 fps and then rejected it after two
+  seconds).
+* `recordingQualityCapabilities` counts only H.264 (`video/avc`) encoder
+  profiles, so a size whose only profile is HEVC is no longer advertised as
+  `h264`, and checks hardware encoders (software encoders only on devices
+  without a hardware H.264 encoder).
+* Detaching the plugin answers pending `recordingQualityApplied` calls with a
+  `recordingQualityFailure` error and pending `waitForRecordingFocus` calls with
+  `false` instead of leaving them unanswered, and `inspectRecordingMedia` after
+  detaching reports an error instead of throwing. Camera infos of selectors and
+  focus tracking of camera controls that are no longer bound are released on
+  rebind instead of only on detach.
 
 ## 0.7.4+3
 

@@ -13,7 +13,9 @@ import android.hardware.camera2.TotalCaptureResult;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
+import android.media.MediaFormat;
 import android.media.MediaRecorder;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -22,6 +24,7 @@ import android.util.Size;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.OptIn;
+import androidx.annotation.VisibleForTesting;
 import androidx.camera.camera2.interop.Camera2CameraControl;
 import androidx.camera.camera2.interop.Camera2CameraInfo;
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop;
@@ -54,11 +57,14 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -93,7 +99,13 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
   private final Map<CameraControl, RecordingConvergenceTracker> cameraControlTrackers =
       new IdentityHashMap<>();
   @NonNull private final Map<Long, BoundRecordingCamera> boundCameras = new HashMap<>();
+  // recordingQualityApplied calls waiting for a poll callback on the main handler.
+  @NonNull
+  private final Set<MethodChannel.Result> pendingAppliedProfileResults =
+      Collections.newSetFromMap(new IdentityHashMap<>());
 
+  // Installed video encoders, enumerated once on mediaExecutor by buildCapabilities.
+  @Nullable private List<VideoEncoderInfo> cachedVideoEncoders;
   @Nullable private MethodChannel channel;
   @Nullable private Handler mainHandler;
 
@@ -115,7 +127,14 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
       channel.setMethodCallHandler(null);
       channel = null;
     }
+    final Set<RecordingConvergenceTracker> trackers =
+        Collections.newSetFromMap(new IdentityHashMap<>());
+    final List<MethodChannel.Result> pendingAppliedResults;
     synchronized (this) {
+      trackers.addAll(convergenceTrackers.values());
+      trackers.addAll(cameraControlTrackers.values());
+      pendingAppliedResults = new ArrayList<>(pendingAppliedProfileResults);
+      pendingAppliedProfileResults.clear();
       previewIds.clear();
       videoCaptureIds.clear();
       selectedCameraInfos.clear();
@@ -126,6 +145,17 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     if (mainHandler != null) {
       mainHandler.removeCallbacksAndMessages(null);
       mainHandler = null;
+    }
+    // Answer callers whose poll callback or focus timeout is dropped below, so
+    // their Dart futures do not stay pending.
+    for (MethodChannel.Result result : pendingAppliedResults) {
+      result.error(
+          "recordingQualityFailure",
+          "The recording quality extension was torn down before the applied profile was read.",
+          null);
+    }
+    for (RecordingConvergenceTracker tracker : trackers) {
+      tracker.cancelWaiters();
     }
     mediaExecutor.shutdownNow();
     focusTimeoutExecutor.shutdownNow();
@@ -160,6 +190,11 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     if (cameraInfo != null) {
       selectedCameraInfos.put(selector, cameraInfo);
     }
+  }
+
+  @VisibleForTesting
+  synchronized boolean hasSelectedCameraInfo(@NonNull CameraSelector selector) {
+    return selectedCameraInfos.containsKey(selector);
   }
 
   @NonNull
@@ -233,6 +268,12 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     } else {
       convergenceTracker = null;
     }
+    if (previousCamera != null
+        && previousCamera.camera.getCameraControl() != camera.getCameraControl()) {
+      // The rebind moved this camera id to another CameraControl (for example a lens switch);
+      // focus metering on the old one no longer concerns this recording session.
+      cameraControlTrackers.remove(previousCamera.camera.getCameraControl());
+    }
     if (convergenceTracker != null) {
       if (bindsVideoCapture) {
         // Applied-profile readback must come from capture results of this binding.
@@ -244,9 +285,24 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
         cameraId,
         new BoundRecordingCamera(
             camera,
+            selector,
             selectedCameraInfo == null ? camera.getCameraInfo() : selectedCameraInfo,
             videoCapture,
             convergenceTracker));
+    pruneSelectedCameraInfos();
+  }
+
+  /**
+   * Forgets camera infos of selectors that no bound camera uses. Every camera creation and switch
+   * registers a new selector, so without pruning the map grows until {@link #tearDown}.
+   */
+  private void pruneSelectedCameraInfos() {
+    final Set<CameraSelector> boundSelectors =
+        Collections.newSetFromMap(new IdentityHashMap<>());
+    for (BoundRecordingCamera boundCamera : boundCameras.values()) {
+      boundSelectors.add(boundCamera.selector);
+    }
+    selectedCameraInfos.keySet().retainAll(boundSelectors);
   }
 
   synchronized void clearBoundCameras() {
@@ -273,7 +329,8 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
       }
       cameraControlTrackers.remove(boundCamera.camera.getCameraControl());
       entry.setValue(
-          new BoundRecordingCamera(boundCamera.camera, boundCamera.cameraInfo, null, null));
+          new BoundRecordingCamera(
+              boundCamera.camera, boundCamera.selector, boundCamera.cameraInfo, null, null));
     }
   }
 
@@ -319,6 +376,7 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
       @NonNull String cameraName, @NonNull MethodChannel.Result result) {
     final ListenableFuture<ProcessCameraProvider> providerFuture =
         ProcessCameraProvider.getInstance(context);
+    final Executor mainExecutor = ContextCompat.getMainExecutor(context);
     providerFuture.addListener(
         () -> {
           try {
@@ -331,7 +389,15 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
                   null);
               return;
             }
-            result.success(buildCapabilities(cameraInfo));
+            // Enumerating qualities, frame rates, sensor durations and encoders is too slow for
+            // the main thread on low-end devices; the result is still delivered on it.
+            mediaExecutor.execute(() -> deliverCapabilities(cameraInfo, result, mainExecutor));
+          } catch (RejectedExecutionException exception) {
+            sendError(
+                result,
+                "recordingQualityFailure",
+                "The recording quality extension was torn down.",
+                exception);
           } catch (InterruptedException exception) {
             Thread.currentThread().interrupt();
             sendError(result, "recordingQualityFailure", "Camera lookup was interrupted.", exception);
@@ -352,6 +418,24 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
         ContextCompat.getMainExecutor(context));
   }
 
+  private void deliverCapabilities(
+      @NonNull CameraInfo cameraInfo,
+      @NonNull MethodChannel.Result result,
+      @NonNull Executor resultExecutor) {
+    try {
+      final Map<String, Object> capabilities = buildCapabilities(cameraInfo);
+      resultExecutor.execute(() -> result.success(capabilities));
+    } catch (RuntimeException exception) {
+      resultExecutor.execute(
+          () ->
+              sendError(
+                  result,
+                  "recordingQualityFailure",
+                  "CameraX could not inspect recording capabilities.",
+                  exception));
+    }
+  }
+
   @Nullable
   private CameraInfo findCameraInfo(
       @NonNull ProcessCameraProvider provider, @NonNull String cameraName) {
@@ -363,8 +447,19 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     return null;
   }
 
+  /** Builds the capabilities of {@code cameraInfo}. Runs on {@link #mediaExecutor}. */
   @NonNull
-  private Map<String, Object> buildCapabilities(@NonNull CameraInfo cameraInfo) {
+  Map<String, Object> buildCapabilities(@NonNull CameraInfo cameraInfo) {
+    if (cachedVideoEncoders == null) {
+      // The installed codecs do not change at runtime; enumerate them once.
+      cachedVideoEncoders = installedVideoEncoders();
+    }
+    return buildCapabilities(cameraInfo, cachedVideoEncoders);
+  }
+
+  @NonNull
+  Map<String, Object> buildCapabilities(
+      @NonNull CameraInfo cameraInfo, @NonNull List<VideoEncoderInfo> videoEncoders) {
     final Recorder capabilityRecorder = new Recorder.Builder().build();
     final int capabilitiesSource = capabilityRecorder.getVideoCapabilitiesSource();
     final VideoCapabilities videoCapabilities =
@@ -372,6 +467,9 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     final EncoderProfilesResolver profilesResolver =
         capabilityRecorder.getEncoderProfilesResolver(cameraInfo, capabilitiesSource);
     final Set<Range<Integer>> cameraFrameRateRanges = cameraInfo.getSupportedFrameRateRanges();
+    final StreamConfigurationMap configurationMap =
+        Camera2CameraInfo.from(cameraInfo)
+            .getCameraCharacteristic(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
     final List<Map<String, Object>> profiles = new ArrayList<>();
 
     for (Quality quality : videoCapabilities.getSupportedQualities(DynamicRange.SDR)) {
@@ -382,9 +480,9 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
         continue;
       }
       for (int fps : RECORDING_FRAME_RATES) {
-        if (!hasFrameRateRangeContaining(cameraFrameRateRanges, fps)
-            || !sensorSupportsFrameRate(cameraInfo, resolution, fps)
-            || !hasCompatibleEncoderProfile(encoderProfiles, resolution, fps)) {
+        if (!hasFixedFrameRateRange(cameraFrameRateRanges, fps)
+            || !sensorSupportsFrameRate(configurationMap, resolution, fps)
+            || !hasCompatibleAvcEncoderProfile(encoderProfiles, resolution, fps, videoEncoders)) {
           continue;
         }
         final Map<String, Object> profile = new HashMap<>();
@@ -438,21 +536,28 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     throw new IllegalArgumentException("codec must be h264 or hevc.");
   }
 
-  private boolean hasFrameRateRangeContaining(
-      @NonNull Set<Range<Integer>> availableRanges, int fps) {
+  /**
+   * Whether the camera offers the fixed range {@code [fps, fps]}.
+   *
+   * <p>The preview requests exactly that range and {@code recordingQualityApplied} only accepts a
+   * fixed AE target range, so a range that merely contains {@code fps} (for example {@code [15,
+   * 60]}) would advertise a profile that the readback then rejects.
+   */
+  static boolean hasFixedFrameRateRange(@NonNull Set<Range<Integer>> availableRanges, int fps) {
     for (Range<Integer> range : availableRanges) {
-      if (range.contains(fps)) {
+      if (range.getLower() == fps && range.getUpper() == fps) {
         return true;
       }
     }
     return false;
   }
 
-  private boolean sensorSupportsFrameRate(
-      @NonNull CameraInfo cameraInfo, @NonNull Size resolution, int fps) {
-    final StreamConfigurationMap configurationMap =
-        Camera2CameraInfo.from(cameraInfo)
-            .getCameraCharacteristic(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+  /**
+   * Whether the sensor exposes {@code resolution} for {@link MediaRecorder} output with a minimum
+   * frame duration short enough for {@code fps}.
+   */
+  static boolean sensorSupportsFrameRate(
+      @Nullable StreamConfigurationMap configurationMap, @NonNull Size resolution, int fps) {
     if (configurationMap == null) {
       return false;
     }
@@ -476,7 +581,7 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
         && 1_000_000_000.0 / minimumFrameDuration + 0.001 >= fps;
   }
 
-  private long getMinimumRecordingFrameDuration(
+  private static long getMinimumRecordingFrameDuration(
       @NonNull StreamConfigurationMap configurationMap, @NonNull Size resolution) {
     try {
       return configurationMap.getOutputMinFrameDuration(MediaRecorder.class, resolution);
@@ -485,46 +590,144 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     }
   }
 
-  private boolean hasCompatibleEncoderProfile(
-      @NonNull EncoderProfilesProxy encoderProfiles, @NonNull Size resolution, int fps) {
+  /**
+   * Whether the encoder profiles hold an H.264 ({@code video/avc}) profile of {@code resolution}
+   * that an installed encoder accepts at {@code fps}.
+   *
+   * <p>Only AVC profiles count because the extension advertises {@code h264} only: a size whose
+   * only profile is HEVC must not be advertised as H.264.
+   */
+  private static boolean hasCompatibleAvcEncoderProfile(
+      @NonNull EncoderProfilesProxy encoderProfiles,
+      @NonNull Size resolution,
+      int fps,
+      @NonNull List<VideoEncoderInfo> videoEncoders) {
     for (EncoderProfilesProxy.VideoProfileProxy videoProfile : encoderProfiles.getVideoProfiles()) {
       if (videoProfile.getWidth() != resolution.getWidth()
-          || videoProfile.getHeight() != resolution.getHeight()) {
+          || videoProfile.getHeight() != resolution.getHeight()
+          || !MediaFormat.MIMETYPE_VIDEO_AVC.equalsIgnoreCase(videoProfile.getMediaType())) {
         continue;
       }
       if (encoderAccepts(
-          videoProfile.getMediaType(), resolution.getWidth(), resolution.getHeight(), fps)) {
+          videoEncoders,
+          MediaFormat.MIMETYPE_VIDEO_AVC,
+          resolution.getWidth(),
+          resolution.getHeight(),
+          fps)) {
         return true;
       }
     }
     return false;
   }
 
-  private boolean encoderAccepts(
-      @NonNull String mimeType, int width, int height, int fps) {
-    try {
-      for (MediaCodecInfo codecInfo : new MediaCodecList(MediaCodecList.ALL_CODECS).getCodecInfos()) {
-        if (!codecInfo.isEncoder()) {
-          continue;
-        }
-        for (String supportedType : codecInfo.getSupportedTypes()) {
-          if (!mimeType.equalsIgnoreCase(supportedType)) {
-            continue;
-          }
-          final MediaCodecInfo.VideoCapabilities videoCapabilities =
-              codecInfo.getCapabilitiesForType(supportedType).getVideoCapabilities();
-          if (videoCapabilities != null
-              && videoCapabilities.areSizeAndRateSupported(width, height, fps)) {
-            return true;
-          }
+  /**
+   * Whether an encoder for {@code mimeType} accepts {@code width}x{@code height} at {@code fps}.
+   *
+   * <p>Hardware encoders are preferred: when the device has any hardware encoder for the type, only
+   * hardware encoders count, because a software encoder that nominally accepts the size and rate
+   * cannot sustain it in practice. Software encoders count only on devices without a hardware
+   * encoder for the type (for example emulators).
+   */
+  static boolean encoderAccepts(
+      @NonNull List<VideoEncoderInfo> videoEncoders,
+      @NonNull String mimeType,
+      int width,
+      int height,
+      int fps) {
+    boolean hasHardwareEncoder = false;
+    boolean softwareEncoderAccepts = false;
+    for (VideoEncoderInfo encoder : videoEncoders) {
+      if (!encoder.supportsType(mimeType)) {
+        continue;
+      }
+      final boolean accepts = encoder.acceptsSizeAndRate(mimeType, width, height, fps);
+      if (encoder.isSoftwareOnly()) {
+        softwareEncoderAccepts |= accepts;
+        continue;
+      }
+      hasHardwareEncoder = true;
+      if (accepts) {
+        return true;
+      }
+    }
+    return !hasHardwareEncoder && softwareEncoderAccepts;
+  }
+
+  /**
+   * Returns the installed encoders. Enumerating the codec list is slow, so this runs off the main
+   * thread.
+   */
+  @NonNull
+  private static List<VideoEncoderInfo> installedVideoEncoders() {
+    final List<VideoEncoderInfo> encoders = new ArrayList<>();
+    for (MediaCodecInfo codecInfo : new MediaCodecList(MediaCodecList.ALL_CODECS).getCodecInfos()) {
+      if (codecInfo.isEncoder()) {
+        encoders.add(new MediaCodecVideoEncoderInfo(codecInfo));
+      }
+    }
+    return encoders;
+  }
+
+  /** The encoder facts {@link #encoderAccepts} needs. */
+  interface VideoEncoderInfo {
+    boolean supportsType(@NonNull String mimeType);
+
+    /** Whether this encoder runs in software only, as opposed to a hardware (vendor) encoder. */
+    boolean isSoftwareOnly();
+
+    /** Whether this encoder accepts {@code mimeType} at the given size and frame rate. */
+    boolean acceptsSizeAndRate(@NonNull String mimeType, int width, int height, int fps);
+  }
+
+  /** {@link VideoEncoderInfo} backed by an installed {@link MediaCodecInfo} encoder. */
+  private static final class MediaCodecVideoEncoderInfo implements VideoEncoderInfo {
+    @NonNull private final MediaCodecInfo codecInfo;
+
+    MediaCodecVideoEncoderInfo(@NonNull MediaCodecInfo codecInfo) {
+      this.codecInfo = codecInfo;
+    }
+
+    @Override
+    public boolean supportsType(@NonNull String mimeType) {
+      return findSupportedType(mimeType) != null;
+    }
+
+    @Override
+    public boolean isSoftwareOnly() {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        return codecInfo.isSoftwareOnly();
+      }
+      final String name = codecInfo.getName().toLowerCase(Locale.ROOT);
+      return name.startsWith("omx.google.") || name.startsWith("c2.android.");
+    }
+
+    @Override
+    public boolean acceptsSizeAndRate(@NonNull String mimeType, int width, int height, int fps) {
+      final String supportedType = findSupportedType(mimeType);
+      if (supportedType == null) {
+        return false;
+      }
+      try {
+        final MediaCodecInfo.VideoCapabilities videoCapabilities =
+            codecInfo.getCapabilitiesForType(supportedType).getVideoCapabilities();
+        return videoCapabilities != null
+            && videoCapabilities.areSizeAndRateSupported(width, height, fps);
+      } catch (IllegalArgumentException | IllegalStateException exception) {
+        // Failure to verify encoder constraints means this combination must not
+        // be advertised as supported.
+        return false;
+      }
+    }
+
+    @Nullable
+    private String findSupportedType(@NonNull String mimeType) {
+      for (String supportedType : codecInfo.getSupportedTypes()) {
+        if (mimeType.equalsIgnoreCase(supportedType)) {
+          return supportedType;
         }
       }
-    } catch (IllegalArgumentException | IllegalStateException exception) {
-      // Failure to verify encoder constraints means this combination must not
-      // be advertised as supported.
-      return false;
+      return null;
     }
-    return false;
   }
 
   private boolean supportsFocusLock(@NonNull CameraInfo cameraInfo) {
@@ -623,9 +826,20 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
 
   private void pollAppliedProfile(
       long cameraId, @NonNull MethodChannel.Result result, long deadlineMillis) {
+    synchronized (this) {
+      pendingAppliedProfileResults.add(result);
+    }
     getMainHandler()
         .postDelayed(
-            () -> waitForAppliedProfile(cameraId, result, deadlineMillis),
+            () -> {
+              synchronized (this) {
+                if (!pendingAppliedProfileResults.remove(result)) {
+                  // Already answered by tearDown.
+                  return;
+                }
+              }
+              waitForAppliedProfile(cameraId, result, deadlineMillis);
+            },
             APPLIED_PROFILE_POLL_MILLIS);
   }
 
@@ -654,32 +868,45 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
         && stabilizationMode != CaptureResult.CONTROL_VIDEO_STABILIZATION_MODE_OFF;
   }
 
+  @NonNull
+  RecordingMediaInspector createMediaInspector() {
+    return new RecordingMediaInspector();
+  }
+
   private void inspectRecordingMedia(
       @NonNull String path, @NonNull MethodChannel.Result result) {
-    mediaExecutor.execute(
-        () -> {
-          try {
-            final Map<String, Object> metadata = new RecordingMediaInspector().inspect(new File(path));
-            ContextCompat.getMainExecutor(context).execute(() -> result.success(metadata));
-          } catch (RecordingMediaInspector.MediaInspectionException exception) {
-            ContextCompat.getMainExecutor(context)
-                .execute(
-                    () ->
-                        result.error(
-                            exception.code,
-                            exception.getMessage(),
-                            errorDetails(exception.getCause())));
-          } catch (RuntimeException exception) {
-            ContextCompat.getMainExecutor(context)
-                .execute(
-                    () ->
-                        sendError(
-                            result,
-                            "recordingMediaInvalid",
-                            "The finalized recording metadata could not be read.",
-                            exception));
-          }
-        });
+    try {
+      mediaExecutor.execute(() -> inspectRecordingMediaInBackground(path, result));
+    } catch (RejectedExecutionException exception) {
+      sendError(
+          result,
+          "recordingQualityFailure",
+          "The recording quality extension was torn down.",
+          exception);
+    }
+  }
+
+  /** Reads the media metadata on {@link #mediaExecutor} and answers on the main thread. */
+  private void inspectRecordingMediaInBackground(
+      @NonNull String path, @NonNull MethodChannel.Result result) {
+    final Executor mainExecutor = ContextCompat.getMainExecutor(context);
+    try {
+      final Map<String, Object> metadata = createMediaInspector().inspect(new File(path));
+      mainExecutor.execute(() -> result.success(metadata));
+    } catch (RecordingMediaInspector.MediaInspectionException exception) {
+      mainExecutor.execute(
+          () ->
+              result.error(
+                  exception.code, exception.getMessage(), errorDetails(exception.getCause())));
+    } catch (RuntimeException exception) {
+      mainExecutor.execute(
+          () ->
+              sendError(
+                  result,
+                  "recordingMediaInvalid",
+                  "The finalized recording metadata could not be read.",
+                  exception));
+    }
   }
 
   private void waitForRecordingFocus(long cameraId, @NonNull MethodChannel.Result result) {
@@ -758,16 +985,19 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
 
   private static final class BoundRecordingCamera {
     @NonNull final Camera camera;
+    @NonNull final CameraSelector selector;
     @NonNull final CameraInfo cameraInfo;
     @Nullable final VideoCapture<?> videoCapture;
     @Nullable final RecordingConvergenceTracker convergenceTracker;
 
     BoundRecordingCamera(
         @NonNull Camera camera,
+        @NonNull CameraSelector selector,
         @NonNull CameraInfo cameraInfo,
         @Nullable VideoCapture<?> videoCapture,
         @Nullable RecordingConvergenceTracker convergenceTracker) {
       this.camera = camera;
+      this.selector = selector;
       this.cameraInfo = cameraInfo;
       this.videoCapture = videoCapture;
       this.convergenceTracker = convergenceTracker;
@@ -833,6 +1063,18 @@ final class RecordingQualityController implements MethodChannel.MethodCallHandle
     synchronized void reset() {
       focusConverged = null;
       exposureConverged = null;
+    }
+
+    /** Answers every pending {@link #waitForConvergence} call with {@code false}. */
+    void cancelWaiters() {
+      final List<ConvergenceWaiter> cancelledWaiters;
+      synchronized (this) {
+        cancelledWaiters = new ArrayList<>(waiters);
+        waiters.clear();
+      }
+      for (ConvergenceWaiter waiter : cancelledWaiters) {
+        waiter.complete(false);
+      }
     }
 
     /**

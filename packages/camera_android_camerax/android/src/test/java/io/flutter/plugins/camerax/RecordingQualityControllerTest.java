@@ -5,7 +5,10 @@
 package io.flutter.plugins.camerax;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -22,10 +25,12 @@ import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
+import android.os.Handler;
 import android.os.Looper;
 import android.util.Range;
 import android.util.Size;
 import androidx.camera.camera2.interop.Camera2CameraControl;
+import androidx.camera.camera2.interop.Camera2CameraInfo;
 import androidx.camera.camera2.interop.CaptureRequestOptions;
 import androidx.camera.core.Camera;
 import androidx.camera.core.CameraControl;
@@ -34,8 +39,10 @@ import androidx.camera.core.CameraSelector;
 import androidx.camera.core.Preview;
 import androidx.camera.core.ResolutionInfo;
 import androidx.camera.core.UseCase;
+import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.video.Recorder;
 import androidx.camera.video.VideoCapture;
+import com.google.common.util.concurrent.Futures;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 import java.time.Duration;
@@ -43,6 +50,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -70,6 +78,9 @@ public class RecordingQualityControllerTest {
   public void setUp() {
     final Context context = mock(Context.class);
     when(context.getApplicationContext()).thenReturn(context);
+    // ContextCompat.getMainExecutor(context) delegates to Context#getMainExecutor.
+    when(context.getMainExecutor())
+        .thenReturn(command -> new Handler(Looper.getMainLooper()).post(command));
     controller = new RecordingQualityController(context);
 
     requestedOptions = mock(CaptureRequestOptions.class);
@@ -574,9 +585,325 @@ public class RecordingQualityControllerTest {
     verify(result).success(appliedProfile(30, false));
   }
 
-  @SuppressWarnings("unchecked")
+  @Test
+  public void recordingQualityCapabilities_buildsOffTheMainThreadAndAnswersOnIt()
+      throws Exception {
+    final CameraInfo cameraInfo = mock(CameraInfo.class);
+    final RecordingQualityController spyController = Mockito.spy(controller);
+    final Map<String, Object> capabilities = Collections.singletonMap("profiles", "built");
+    final Thread[] buildThread = {null};
+    Mockito.doAnswer(
+            invocation -> {
+              buildThread[0] = Thread.currentThread();
+              return capabilities;
+            })
+        .when(spyController)
+        .buildCapabilities(cameraInfo);
+    final CapturingResult result = new CapturingResult();
+
+    try (AutoCloseable ignoredLookup = mockCameraLookup(cameraInfo)) {
+      spyController.onMethodCall(capabilitiesCall(), result);
+      awaitResult(result);
+    }
+
+    assertEquals("success", result.outcome);
+    assertEquals(capabilities, result.value);
+    assertNotEquals(Looper.getMainLooper().getThread(), buildThread[0]);
+    assertEquals(Looper.getMainLooper().getThread(), result.thread);
+  }
+
+  @Test
+  public void recordingQualityCapabilities_reportsBuildFailureOnTheMainThread() throws Exception {
+    final CameraInfo cameraInfo = mock(CameraInfo.class);
+    final RecordingQualityController spyController = Mockito.spy(controller);
+    Mockito.doThrow(new IllegalStateException("capabilities unavailable"))
+        .when(spyController)
+        .buildCapabilities(cameraInfo);
+    final CapturingResult result = new CapturingResult();
+
+    try (AutoCloseable ignoredLookup = mockCameraLookup(cameraInfo)) {
+      spyController.onMethodCall(capabilitiesCall(), result);
+      awaitResult(result);
+    }
+
+    assertEquals("error", result.outcome);
+    assertEquals("recordingQualityFailure", result.errorCode);
+    assertEquals(Looper.getMainLooper().getThread(), result.thread);
+  }
+
+  @Test
+  public void inspectRecordingMedia_inspectsOffTheMainThreadAndAnswersOnIt() throws Exception {
+    final Map<String, Object> metadata = Collections.singletonMap("width", 1920);
+    final Thread[] inspectThread = {null};
+    final RecordingMediaInspector inspector = mock(RecordingMediaInspector.class);
+    when(inspector.inspect(any()))
+        .thenAnswer(
+            invocation -> {
+              inspectThread[0] = Thread.currentThread();
+              return metadata;
+            });
+    final CapturingResult result = inspect(inspector);
+
+    assertEquals("success", result.outcome);
+    assertEquals(metadata, result.value);
+    assertNotEquals(Looper.getMainLooper().getThread(), inspectThread[0]);
+    assertEquals(Looper.getMainLooper().getThread(), result.thread);
+  }
+
+  @Test
+  public void inspectRecordingMedia_reportsInspectionErrorCode() throws Exception {
+    final RecordingMediaInspector inspector = mock(RecordingMediaInspector.class);
+    when(inspector.inspect(any()))
+        .thenThrow(
+            new RecordingMediaInspector.MediaInspectionException(
+                "recordingMediaNotFound", "missing", null));
+
+    final CapturingResult result = inspect(inspector);
+
+    assertEquals("error", result.outcome);
+    assertEquals("recordingMediaNotFound", result.errorCode);
+    assertEquals(Looper.getMainLooper().getThread(), result.thread);
+  }
+
+  @Test
+  public void inspectRecordingMedia_reportsUnexpectedFailureAsInvalidMedia() throws Exception {
+    final RecordingMediaInspector inspector = mock(RecordingMediaInspector.class);
+    when(inspector.inspect(any())).thenThrow(new IllegalStateException("extractor crashed"));
+
+    final CapturingResult result = inspect(inspector);
+
+    assertEquals("error", result.outcome);
+    assertEquals("recordingMediaInvalid", result.errorCode);
+    assertEquals(Looper.getMainLooper().getThread(), result.thread);
+  }
+
+  @Test
+  public void inspectRecordingMedia_reportsAnErrorAfterTearDown() {
+    controller.tearDown();
+    final MethodChannel.Result result = mock(MethodChannel.Result.class);
+
+    controller.onMethodCall(
+        new MethodCall("inspectRecordingMedia", Collections.singletonMap("path", "/a.mp4")),
+        result);
+
+    verify(result).error(eq("recordingQualityFailure"), anyString(), any());
+  }
+
+  @Test
+  public void waitForRecordingFocus_answersTrueOnceAfAndAeConvergeInCaptureResults() {
+    final RecordingQualityController.RecordingConvergenceTracker tracker =
+        bindRecordingCamera(30, focusMeteringSupportedCamera());
+    final MethodChannel.Result result = mock(MethodChannel.Result.class);
+
+    controller.onMethodCall(cameraIdCall("waitForRecordingFocus"), result);
+    // Only AF converged: keep waiting.
+    deliver(
+        tracker,
+        convergenceResult(
+            CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED,
+            CaptureResult.CONTROL_AE_STATE_SEARCHING));
+    shadowOf(Looper.getMainLooper()).idle();
+    verify(result, never()).success(any());
+
+    deliver(
+        tracker,
+        convergenceResult(
+            CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED,
+            CaptureResult.CONTROL_AE_STATE_CONVERGED));
+    shadowOf(Looper.getMainLooper()).idle();
+
+    verify(result).success(true);
+  }
+
+  @Test
+  public void waitForRecordingFocus_waitsForNewConvergenceAfterFocusMeteringStarts() {
+    final Camera camera = focusMeteringSupportedCamera();
+    final RecordingQualityController.RecordingConvergenceTracker tracker =
+        bindRecordingCamera(30, camera);
+    deliver(
+        tracker,
+        convergenceResult(
+            CaptureResult.CONTROL_AF_STATE_PASSIVE_FOCUSED,
+            CaptureResult.CONTROL_AE_STATE_CONVERGED));
+
+    // A new metering request (for example tap to focus) invalidates the earlier convergence.
+    controller.onFocusMeteringStarted(camera.getCameraControl());
+    final MethodChannel.Result result = mock(MethodChannel.Result.class);
+    controller.onMethodCall(cameraIdCall("waitForRecordingFocus"), result);
+    shadowOf(Looper.getMainLooper()).idle();
+    verify(result, never()).success(any());
+
+    deliver(
+        tracker,
+        convergenceResult(
+            CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED, CaptureResult.CONTROL_AE_STATE_LOCKED));
+    shadowOf(Looper.getMainLooper()).idle();
+
+    verify(result).success(true);
+  }
+
+  private static TotalCaptureResult convergenceResult(int afState, int aeState) {
+    final TotalCaptureResult captureResult = mock(TotalCaptureResult.class);
+    when(captureResult.get(CaptureResult.CONTROL_AF_STATE)).thenReturn(afState);
+    when(captureResult.get(CaptureResult.CONTROL_AE_STATE)).thenReturn(aeState);
+    return captureResult;
+  }
+
+  @Test
+  public void tearDown_answersPendingAppliedProfileAndFocusWaits() {
+    bindRecordingCamera(30, focusMeteringSupportedCamera());
+    final MethodChannel.Result applied = mock(MethodChannel.Result.class);
+    controller.onMethodCall(appliedCall(), applied);
+    final MethodChannel.Result focus = mock(MethodChannel.Result.class);
+    controller.onMethodCall(cameraIdCall("waitForRecordingFocus"), focus);
+    verify(applied, never()).error(any(), any(), any());
+    verify(focus, never()).success(any());
+
+    controller.tearDown();
+    shadowOf(Looper.getMainLooper()).idle();
+
+    verify(applied).error(eq("recordingQualityFailure"), anyString(), isNull());
+    verify(focus).success(false);
+    // The dropped poll callback must not answer a second time.
+    shadowOf(Looper.getMainLooper()).idleFor(PAST_APPLIED_PROFILE_DEADLINE);
+    verify(applied, never()).success(any());
+  }
+
+  @Test
+  public void registerBoundCamera_forgetsCameraInfoOfSelectorsNoLongerBound() {
+    final Preview preview = mock(Preview.class);
+    controller.registerPreview(preview, CAMERA_ID);
+    final CameraSelector firstSelector = mock(CameraSelector.class);
+    final CameraSelector secondSelector = mock(CameraSelector.class);
+    controller.registerCameraSelector(firstSelector, mock(CameraInfo.class));
+    controller.registerBoundCamera(
+        firstSelector, Collections.singletonList(preview), mockCamera());
+    assertTrue(controller.hasSelectedCameraInfo(firstSelector));
+
+    // A camera switch registers a new selector and binds it for the same camera id.
+    controller.registerCameraSelector(secondSelector, mock(CameraInfo.class));
+    controller.clearBoundCameras();
+    controller.registerBoundCamera(
+        secondSelector, Collections.singletonList(preview), mockCamera());
+
+    assertFalse(controller.hasSelectedCameraInfo(firstSelector));
+    assertTrue(controller.hasSelectedCameraInfo(secondSelector));
+  }
+
+  @Test
+  public void registerBoundCamera_dropsTheTrackerMappingOfTheReplacedCameraControl() {
+    final RecordingQualityController.RecordingConvergenceTracker tracker =
+        mock(RecordingQualityController.RecordingConvergenceTracker.class);
+    final CameraControl initialCameraControl = mock(CameraControl.class);
+    final CameraControl reboundCameraControl = mock(CameraControl.class);
+
+    bindThenRebindPreviewOnly(
+        mockVideoCapture(),
+        tracker,
+        mockCamera(initialCameraControl, mock(CameraInfo.class)),
+        mockCamera(reboundCameraControl, mock(CameraInfo.class)));
+
+    controller.onFocusMeteringStarted(initialCameraControl);
+    verify(tracker, never()).reset();
+    controller.onFocusMeteringStarted(reboundCameraControl);
+    verify(tracker).reset();
+  }
+
+  /** Captures how and on which thread a method call was answered. */
+  private static final class CapturingResult implements MethodChannel.Result {
+    volatile String outcome;
+    volatile Object value;
+    volatile String errorCode;
+    volatile Thread thread;
+
+    @Override
+    public void success(Object result) {
+      value = result;
+      answer("success");
+    }
+
+    @Override
+    public void error(String code, String message, Object details) {
+      errorCode = code;
+      answer("error");
+    }
+
+    @Override
+    public void notImplemented() {
+      answer("notImplemented");
+    }
+
+    private void answer(String answeredOutcome) {
+      thread = Thread.currentThread();
+      outcome = answeredOutcome;
+    }
+  }
+
+  /** Runs the main looper until {@code result} is answered by a background task. */
+  private static void awaitResult(CapturingResult result) throws InterruptedException {
+    final long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+    while (result.outcome == null) {
+      if (System.nanoTime() > deadline) {
+        throw new AssertionError("The method call was not answered.");
+      }
+      shadowOf(Looper.getMainLooper()).idle();
+      Thread.sleep(5);
+    }
+  }
+
+  private CapturingResult inspect(RecordingMediaInspector inspector) throws Exception {
+    final RecordingQualityController spyController = Mockito.spy(controller);
+    Mockito.doReturn(inspector).when(spyController).createMediaInspector();
+    final CapturingResult result = new CapturingResult();
+    spyController.onMethodCall(
+        new MethodCall("inspectRecordingMedia", Collections.singletonMap("path", "/a.mp4")),
+        result);
+    awaitResult(result);
+    return result;
+  }
+
+  private static MethodCall capabilitiesCall() {
+    return new MethodCall(
+        "recordingQualityCapabilities", Collections.singletonMap("cameraName", "0"));
+  }
+
+  /** Makes ProcessCameraProvider resolve camera name "0" to {@code cameraInfo}. */
+  private static AutoCloseable mockCameraLookup(CameraInfo cameraInfo) {
+    final ProcessCameraProvider provider = mock(ProcessCameraProvider.class);
+    when(provider.getAvailableCameraInfos()).thenReturn(Collections.singletonList(cameraInfo));
+    final MockedStatic<ProcessCameraProvider> mockedProvider =
+        Mockito.mockStatic(ProcessCameraProvider.class);
+    mockedProvider
+        .when(() -> ProcessCameraProvider.getInstance(any()))
+        .thenReturn(Futures.immediateFuture(provider));
+    final Camera2CameraInfo camera2CameraInfo = mock(Camera2CameraInfo.class);
+    when(camera2CameraInfo.getCameraId()).thenReturn("0");
+    // Camera2CameraInfo.from is resolved on the main looper, which runs on this thread.
+    final MockedStatic<Camera2CameraInfo> mockedCamera2CameraInfo =
+        Mockito.mockStatic(Camera2CameraInfo.class);
+    mockedCamera2CameraInfo
+        .when(() -> Camera2CameraInfo.from(cameraInfo))
+        .thenReturn(camera2CameraInfo);
+    return () -> {
+      mockedCamera2CameraInfo.close();
+      mockedProvider.close();
+    };
+  }
+
+  private static Camera focusMeteringSupportedCamera() {
+    final CameraInfo cameraInfo = mock(CameraInfo.class);
+    when(cameraInfo.isFocusMeteringSupported(any())).thenReturn(true);
+    return mockCamera(mock(CameraControl.class), cameraInfo);
+  }
+
   private RecordingQualityController.RecordingConvergenceTracker bindRecordingCamera(
       int encoderFrameRate) {
+    return bindRecordingCamera(encoderFrameRate, mockCamera());
+  }
+
+  @SuppressWarnings("unchecked")
+  private RecordingQualityController.RecordingConvergenceTracker bindRecordingCamera(
+      int encoderFrameRate, Camera camera) {
     final Recorder recorder = mock(Recorder.class);
     when(recorder.getVideoEncodingFrameRate()).thenReturn(encoderFrameRate);
     final ResolutionInfo resolutionInfo = mock(ResolutionInfo.class);
@@ -592,7 +919,7 @@ public class RecordingQualityControllerTest {
     controller.registerPreview(boundPreview, CAMERA_ID);
     controller.registerVideoCapture(boundVideoCapture, tracker);
     controller.registerBoundCamera(
-        mock(CameraSelector.class), Arrays.asList(boundPreview, boundVideoCapture), mockCamera());
+        mock(CameraSelector.class), Arrays.asList(boundPreview, boundVideoCapture), camera);
     return tracker;
   }
 
