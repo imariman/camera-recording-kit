@@ -1453,14 +1453,10 @@ final class DefaultCamera: NSObject, Camera {
 
   func recordingQualityApplied() -> [String: Any] {
     let dimensions = videoDimensionsConverter(captureDevice.flutterActiveFormat)
-    // Report the codec the writer uses (or would use), not the request. "unknown" makes the
-    // shared layer reject the profile instead of assuming H.264.
-    let codec = RecordingQuality.VideoCodec(
-      writerSettings: writerVideoSettings ?? recommendedWriterVideoSettings())
     var result: [String: Any] = [
       "width": Int(dimensions.width),
       "height": Int(dimensions.height),
-      "codec": codec?.rawValue ?? "unknown",
+      "codec": appliedCodecName(),
     ]
 
     let duration = captureDevice.activeVideoMinFrameDuration
@@ -1473,6 +1469,24 @@ final class DefaultCamera: NSObject, Camera {
       result["stabilizationEnabled"] = connection.activeVideoStabilizationMode != .off
     }
     return result
+  }
+
+  /// The codec the writer uses (or would use), not the request.
+  ///
+  /// It comes from the current writer settings or the output's recommended settings. When the
+  /// output cannot list its codecs yet, the configured codec is reported; `setupWriter` validates
+  /// it again before writing. "unknown" (the output lists codecs without the configured one) makes
+  /// the shared layer reject the profile instead of assuming H.264.
+  private func appliedCodecName() -> String {
+    if let codec = RecordingQuality.VideoCodec(
+      writerSettings: writerVideoSettings ?? recommendedWriterVideoSettings())
+    {
+      return codec.rawValue
+    }
+    if captureVideoOutput.availableVideoCodecTypesForAssetWriter(writingTo: .mp4).isEmpty {
+      return recordingVideoCodec.rawValue
+    }
+    return "unknown"
   }
 
   func writerVideoCodecTypes(forCameraName cameraName: String) -> [AVVideoCodecType]? {

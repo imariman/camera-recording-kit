@@ -13,7 +13,8 @@
 * `recordingQualityCapabilities` advertises HEVC only when the capture output
   reports it (VideoToolbox encoder check before camera permission is granted).
 * `recordingQualityApplied` derives `codec` from the writer settings instead
-  of echoing the request, and reports `unknown` when no codec can be resolved.
+  of echoing the request, and reports `unknown` when the capture output lists
+  codecs without the configured one.
 * Holds a `UIApplication` background task while recording from
   `willResignActive` and finalizes a running recording once the app enters the
   background (where `AVAssetWriter` would fail it). The next
