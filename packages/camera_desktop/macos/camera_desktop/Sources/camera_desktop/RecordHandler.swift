@@ -10,12 +10,23 @@ class RecordHandler: NSObject {
     private let lock = UnfairLock()
     private let timeline: RecordingTimeline
     private var recording = false
+    private var writerFailureReported = false
+    private var writerFailureHandler: ((String) -> Void)?
     private(set) var selectedVideoCodec: RecordingQuality.VideoCodec?
 
     /// How often AVAssetWriter writes a movie fragment. A fragmented MP4 that
-    /// was never finalized (process killed, crash) still contains every
-    /// completed fragment, so at most this much media is lost.
+    /// was never finalized (process killed, crash, writer failure) still
+    /// contains every completed fragment, so at most this much media is lost.
     static let movieFragmentInterval = CMTime(value: 1, timescale: 1)
+
+    /// Called at most once per recording, on the thread that appended the
+    /// sample, when the writer leaves the `.writing` state underneath an
+    /// active recording (disk full, encoder error). Samples are no longer
+    /// appended afterwards; `stopRecording` salvages what was written.
+    var onWriterFailure: ((String) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return writerFailureHandler }
+        set { lock.lock(); writerFailureHandler = newValue; lock.unlock() }
+    }
 
     var isRecording: Bool {
         lock.lock()
@@ -166,6 +177,7 @@ class RecordHandler: NSObject {
         }
         timeline.reset(clock: timelineClock)
         recording = true
+        writerFailureReported = false
         selectedVideoCodec = videoCodec
         lock.unlock()
 
@@ -176,30 +188,18 @@ class RecordHandler: NSObject {
     @discardableResult
     func appendVideoBuffer(_ sampleBuffer: CMSampleBuffer) -> Bool {
         lock.lock()
-        guard recording else {
-            lock.unlock()
-            return false
-        }
-        guard let writer = assetWriter else {
+        guard recording, let writer = assetWriter, let input = videoInput else {
             lock.unlock()
             return false
         }
         guard writer.status == .writing else {
+            let failure = takeWriterFailureLocked(writer)
             lock.unlock()
+            failure?()
             return false
         }
-        guard let input = videoInput else {
-            lock.unlock()
-            return false
-        }
-        guard input.isReadyForMoreMediaData else {
-            lock.unlock()
-            return false
-        }
-        guard let adjustedBuffer = timeline.adjustedSampleBuffer(
-            sampleBuffer,
-            track: .video
-        ) else {
+        guard input.isReadyForMoreMediaData,
+              let adjustedBuffer = timeline.adjustedSampleBuffer(sampleBuffer, track: .video) else {
             lock.unlock()
             return false
         }
@@ -210,7 +210,9 @@ class RecordHandler: NSObject {
             sessionStarted = true
         }
         let appended = input.append(adjustedBuffer)
+        let failure = appended ? nil : takeWriterFailureLocked(writer)
         lock.unlock()
+        failure?()
         return appended
     }
 
@@ -218,40 +220,42 @@ class RecordHandler: NSObject {
     @discardableResult
     func appendAudioBuffer(_ sampleBuffer: CMSampleBuffer) -> Bool {
         lock.lock()
-        guard recording else {
-            lock.unlock()
-            return false
-        }
-        guard let writer = assetWriter else {
+        guard recording, let writer = assetWriter, let input = audioInput else {
             lock.unlock()
             return false
         }
         guard writer.status == .writing else {
+            let failure = takeWriterFailureLocked(writer)
             lock.unlock()
+            failure?()
             return false
         }
-        guard let input = audioInput else {
-            lock.unlock()
-            return false
-        }
-        guard input.isReadyForMoreMediaData else {
-            lock.unlock()
-            return false
-        }
-        guard sessionStarted else {
-            lock.unlock()
-            return false
-        }
-        guard let adjustedBuffer = timeline.adjustedSampleBuffer(
-            sampleBuffer,
-            track: .audio
-        ) else {
+        guard input.isReadyForMoreMediaData,
+              sessionStarted,
+              let adjustedBuffer = timeline.adjustedSampleBuffer(sampleBuffer, track: .audio) else {
             lock.unlock()
             return false
         }
         let appended = input.append(adjustedBuffer)
+        let failure = appended ? nil : takeWriterFailureLocked(writer)
         lock.unlock()
+        failure?()
         return appended
+    }
+
+    /// Returns the one-time failure notification for a writer that has left
+    /// `.writing` during an active recording, or nil. Call with `lock` held
+    /// and invoke the result after unlocking.
+    private func takeWriterFailureLocked(_ writer: AVAssetWriter) -> (() -> Void)? {
+        guard writer.status == .failed || writer.status == .cancelled,
+              !writerFailureReported else {
+            return nil
+        }
+        writerFailureReported = true
+        guard let handler = writerFailureHandler else { return nil }
+        let description = writer.error?.localizedDescription
+            ?? "The recording writer stopped unexpectedly."
+        return { handler(description) }
     }
 
     /// Pauses timestamp advancement and drops incoming capture samples.
@@ -276,7 +280,9 @@ class RecordHandler: NSObject {
 
     /// Stops recording and finalizes the file.
     ///
-    /// When no file can be produced, the partially written temporary file is
+    /// When the writer failed during the recording or `finishWriting` fails,
+    /// the fragmented partial file is kept and returned if it still contains
+    /// readable video. When no file can be produced, the temporary file is
     /// deleted before `completion` receives `nil`.
     ///
     /// `completion` runs on an arbitrary queue (never dispatched through the
@@ -307,12 +313,18 @@ class RecordHandler: NSObject {
         lock.unlock()
 
         // Without an appended video sample the writer never started a
-        // session, so finishWriting cannot produce a file. A writer that has
-        // already failed cannot finalize either.
-        guard didStartSession, writer.status == .writing else {
+        // session, so finishWriting cannot produce a file.
+        guard didStartSession else {
             writer.cancelWriting()
             RecordHandler.removeFile(atPath: path)
             completion(nil)
+            return true
+        }
+
+        // A writer that failed underneath the recording cannot finalize, but
+        // the movie fragments it already wrote may still be playable.
+        guard writer.status == .writing else {
+            RecordHandler.salvagePartialRecording(atPath: path, completion: completion)
             return true
         }
 
@@ -323,8 +335,7 @@ class RecordHandler: NSObject {
             if writer.status == .completed {
                 completion(path)
             } else {
-                RecordHandler.removeFile(atPath: path)
-                completion(nil)
+                RecordHandler.salvagePartialRecording(atPath: path, completion: completion)
             }
         }
         return true
@@ -353,6 +364,26 @@ class RecordHandler: NSObject {
         return (true, outcome.path)
     }
 
+    /// Keeps a partially written (fragmented) recording when it still has a
+    /// readable video track with a positive duration; deletes it otherwise.
+    static func salvagePartialRecording(
+        atPath path: String?,
+        completion: @escaping (String?) -> Void
+    ) {
+        guard let path, FileManager.default.fileExists(atPath: path) else {
+            completion(nil)
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            if isReadableRecording(atPath: path) {
+                completion(path)
+            } else {
+                removeFile(atPath: path)
+                completion(nil)
+            }
+        }
+    }
+
     /// Whether the file at `path` has a video track and a positive duration.
     /// Loads the asset synchronously; do not call on the main thread.
     static func isReadableRecording(atPath path: String) -> Bool {
@@ -368,7 +399,8 @@ class RecordHandler: NSObject {
         try? FileManager.default.removeItem(atPath: path)
     }
 
-    /// Test hook: the active writer.
+    /// Test hook: the active writer, so tests can make it fail underneath
+    /// an active recording.
     var assetWriterForTesting: AVAssetWriter? {
         lock.lock()
         defer { lock.unlock() }

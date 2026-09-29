@@ -187,6 +187,10 @@ public class CameraDesktopPlugin: NSObject, FlutterPlugin, NSApplicationDelegate
     }
 
     private func handleCreate(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        // The codec choice is one-shot for the next create attempt. Consume it
+        // before validation so a rejected create cannot leave it pending for
+        // an unrelated later controller.
+        let videoCodec = consumePendingRecordingVideoCodec()
         guard let args = call.arguments as? [String: Any],
               let cameraName = args["cameraName"] as? String,
               let resolutionPreset = args["resolutionPreset"] as? Int else {
@@ -252,7 +256,6 @@ public class CameraDesktopPlugin: NSObject, FlutterPlugin, NSApplicationDelegate
         let cameraId = nextCameraId
         nextCameraId += 1
 
-        let videoCodec = consumePendingRecordingVideoCodec()
         let config = CameraSession.CameraConfig(
             deviceId: deviceId,
             resolutionPreset: resolutionPreset,

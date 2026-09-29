@@ -8,7 +8,25 @@
   and app termination waits up to five seconds for an active recording to
   finalize, without relying on the main run loop. A recording cut short stays
   readable up to its last fragment (#29).
-
+* macOS: a writer failure during recording (disk full, encoder error) is
+  reported once as a `cameraError`, sample appends stop, and
+  `stopVideoRecording` returns the partial file when it is still readable
+  instead of deleting it (#32).
+* macOS: unplugging the active camera finalizes a running recording and emits
+  a `cameraError`; the next `stopVideoRecording` returns that file. A session
+  that stopped during an interruption is restarted when the interruption ends
+  (#32).
+* macOS: the microphone is the system default input (for example AirPods or a
+  USB microphone) when one is set, instead of the first discovered device (#32).
+* macOS: the stabilizer output pool holds up to eight buffers, and
+  `takePicture` encodes a private copy of the frame, so held frames no longer
+  make recording fall back to uncropped frames (#32).
+* macOS: `dispose` during `initialize` now fails the pending initialization
+  with `camera_disposed` instead of leaving it pending, and the capture
+  session graph is torn down on the session queue (#32).
+* macOS: a rejected `create` consumes the one-shot codec selection, photo
+  paths are unique within the same millisecond, and camera modes within
+  0.1 FPS of the requested 30/60 FPS (for example 29.97) are accepted (#32).
 ## 1.2.1
 
 * Adds macOS encoder-validated H.264/HEVC capability metadata and one-shot

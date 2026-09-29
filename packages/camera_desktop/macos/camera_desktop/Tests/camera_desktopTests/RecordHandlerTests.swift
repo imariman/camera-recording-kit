@@ -275,6 +275,77 @@ final class RecordHandlerTests: XCTestCase {
         wait(for: [stopped], timeout: 10)
     }
 
+    func testWriterFailureIsReportedOnceAndStopsAppending() throws {
+        let profile = try fallbackProfile()
+        let handler = RecordHandler(timeline: RecordingTimeline(clock: { self.time(10) }))
+        var failures: [String] = []
+        handler.onWriterFailure = { failures.append($0) }
+        let outputPath = try handler.startRecording(
+            width: Int(profile.width),
+            height: Int(profile.height),
+            targetFps: profile.framesPerSecond,
+            targetBitrate: 1_000_000,
+            enableAudio: true
+        )
+        defer { try? FileManager.default.removeItem(atPath: outputPath) }
+        for frame in 0..<3 {
+            XCTAssertTrue(handler.appendVideoBuffer(try videoSample(
+                presentation: 10 + Double(frame) / 30,
+                width: Int(profile.width),
+                height: Int(profile.height)
+            )))
+        }
+        XCTAssertTrue(failures.isEmpty)
+
+        // Make the writer leave `.writing` underneath the active recording.
+        try XCTUnwrap(handler.assetWriterForTesting).cancelWriting()
+
+        XCTAssertFalse(handler.appendVideoBuffer(try videoSample(
+            presentation: 10.2,
+            width: Int(profile.width),
+            height: Int(profile.height)
+        )))
+        XCTAssertFalse(handler.appendAudioBuffer(try audioSample(presentation: 10.2, duration: 0.1)))
+        XCTAssertFalse(handler.appendVideoBuffer(try videoSample(
+            presentation: 10.3,
+            width: Int(profile.width),
+            height: Int(profile.height)
+        )))
+        XCTAssertEqual(failures.count, 1, "A writer failure must be reported exactly once.")
+        XCTAssertTrue(handler.isRecording, "Dart still owns the stop call after a failure.")
+
+        let stopped = expectation(description: "A failed recording stops")
+        var stoppedPath: String?
+        XCTAssertTrue(handler.stopRecording { path in
+            stoppedPath = path
+            stopped.fulfill()
+        })
+        wait(for: [stopped], timeout: 10)
+        XCTAssertFalse(handler.isRecording)
+        if let stoppedPath {
+            XCTAssertTrue(
+                RecordHandler.isReadableRecording(atPath: stoppedPath),
+                "A salvaged partial recording must be readable."
+            )
+        }
+    }
+
+    func testSalvageKeepsReadablePartialFileAndDeletesUnreadableOne() throws {
+        let garbagePath = NSTemporaryDirectory() + "camera_desktop_garbage_\(UUID().uuidString).mp4"
+        try Data(repeating: 0x42, count: 4096).write(to: URL(fileURLWithPath: garbagePath))
+        defer { try? FileManager.default.removeItem(atPath: garbagePath) }
+
+        let salvaged = expectation(description: "Salvage decides")
+        var salvagedPath: String? = garbagePath
+        RecordHandler.salvagePartialRecording(atPath: garbagePath) { path in
+            salvagedPath = path
+            salvaged.fulfill()
+        }
+        wait(for: [salvaged], timeout: 10)
+        XCTAssertNil(salvagedPath)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: garbagePath))
+    }
+
     /// Real-time writer inputs briefly report not ready when samples arrive
     /// faster than capture would deliver them; retry like a camera would.
     private func appendWhenReady(_ handler: RecordHandler, _ sample: CMSampleBuffer) -> Bool {

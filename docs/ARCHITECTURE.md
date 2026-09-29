@@ -37,7 +37,7 @@ directly while recording, the backend finalizes the file before replying to
 Dart, keeps it on disk and logs its path rather than dropping it. On app
 termination the macOS backend waits up to five seconds for that finalize
 without relying on the main run loop. macOS recordings are fragmented MP4, so
-a file whose finalize is cut short (a kill or a crash) stays
+a file whose finalize is cut short (a kill, a crash, a writer failure) stays
 readable up to its last one-second fragment.
 
 Focus and exposure default to continuous automatic behavior. A lock is applied

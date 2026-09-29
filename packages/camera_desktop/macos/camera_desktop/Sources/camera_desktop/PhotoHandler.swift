@@ -26,9 +26,12 @@ class PhotoHandler {
         }
     }
 
-    /// Generates a unique temporary file path for a captured image.
+    /// Generates a unique temporary file path for a captured image. The
+    /// millisecond timestamp keeps names sortable; the UUID keeps two
+    /// captures within the same millisecond from overwriting each other.
     static func generatePath(cameraId: Int) -> String {
         let timestamp = Int(Date().timeIntervalSince1970 * 1000)
-        return NSTemporaryDirectory() + "camera_desktop_\(cameraId)_\(timestamp).jpg"
+        return NSTemporaryDirectory()
+            + "camera_desktop_\(cameraId)_\(timestamp)_\(UUID().uuidString).jpg"
     }
 }

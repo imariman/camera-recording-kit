@@ -48,7 +48,8 @@ def main():
                 "RecordingQuality.swift", "DeviceEnumerator.swift",
                 "AVCaptureDevice+Extension.swift", "RecordHandler.swift",
                 "UnfairLock.swift", "RecordingTimeline.swift",
-                "MacOSVideoStabilizer.swift",
+                "MacOSVideoStabilizer.swift", "PixelBufferCopy.swift",
+                "PhotoHandler.swift",
             ]])
         bundle = directory / "CameraTests.xctest"
         executable = bundle / "Contents/MacOS/CameraTests"
