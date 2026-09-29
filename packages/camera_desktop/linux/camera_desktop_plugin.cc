@@ -101,10 +101,24 @@ static void handle_get_platform_capabilities(FlMethodCall* method_call) {
 static void handle_create(CameraDesktopPlugin* self,
                           FlMethodCall* method_call) {
   FlValue* args = fl_method_call_get_args(method_call);
-  const char* camera_name =
-      fl_value_get_string(fl_value_lookup_string(args, "cameraName"));
-  int resolution_preset =
-      fl_value_get_int(fl_value_lookup_string(args, "resolutionPreset"));
+  FlValue* camera_name_val =
+      (args && fl_value_get_type(args) == FL_VALUE_TYPE_MAP)
+          ? fl_value_lookup_string(args, "cameraName")
+          : nullptr;
+  FlValue* resolution_preset_val =
+      camera_name_val ? fl_value_lookup_string(args, "resolutionPreset")
+                      : nullptr;
+  if (!camera_name_val ||
+      fl_value_get_type(camera_name_val) != FL_VALUE_TYPE_STRING ||
+      !resolution_preset_val ||
+      fl_value_get_type(resolution_preset_val) != FL_VALUE_TYPE_INT) {
+    fl_method_call_respond_error(method_call, "invalid_args",
+                                 "Missing required arguments for create",
+                                 nullptr, nullptr);
+    return;
+  }
+  const char* camera_name = fl_value_get_string(camera_name_val);
+  int resolution_preset = fl_value_get_int(resolution_preset_val);
   FlValue* audio_val = fl_value_lookup_string(args, "enableAudio");
   bool enable_audio = audio_val ? fl_value_get_bool(audio_val) : false;
 

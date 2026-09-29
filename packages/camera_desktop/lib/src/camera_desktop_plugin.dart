@@ -21,10 +21,16 @@ import 'image_stream_ffi.dart';
 class CameraDesktopPlugin extends CameraPlatform {
   /// Creates a new [CameraDesktopPlugin].
   ///
-  /// The [channel] parameter is exposed for testing only.
-  CameraDesktopPlugin({@visibleForTesting MethodChannel? channel})
-    : _channel =
-          channel ?? const MethodChannel('plugins.flutter.io/camera_desktop');
+  /// The [channel] and [imageStreamFfiFactory] parameters are exposed for
+  /// testing only.
+  CameraDesktopPlugin({
+    @visibleForTesting MethodChannel? channel,
+    @visibleForTesting
+    ImageStreamFfi? Function(int streamHandle)? imageStreamFfiFactory,
+  }) : _channel =
+           channel ?? const MethodChannel('plugins.flutter.io/camera_desktop'),
+       _createImageStreamFfi =
+           imageStreamFfiFactory ?? ImageStreamFfi.tryCreate;
 
   /// Registers this class as the default [CameraPlatform] implementation.
   static void registerWith() {
@@ -33,6 +39,10 @@ class CameraDesktopPlugin extends CameraPlatform {
 
   /// The method channel used to communicate with the native platform.
   final MethodChannel _channel;
+
+  /// Creates the FFI frame reader for a native stream handle, or returns null
+  /// when FFI is unavailable and the MethodChannel fallback must be used.
+  final ImageStreamFfi? Function(int streamHandle) _createImageStreamFfi;
 
   /// Returns desktop backend capabilities for feature-gating advanced controls.
   ///
@@ -89,6 +99,12 @@ class CameraDesktopPlugin extends CameraPlatform {
   final Map<int, StreamController<CameraImageData>> _imageStreamControllers =
       {};
 
+  /// Active FFI frame readers per camera, with the controller each feeds.
+  ///
+  /// [dispose] stops these pollers even when the subscriber never cancels.
+  final Map<int, Map<ImageStreamFfi, StreamController<CameraImageData>>>
+  _ffiImageStreams = {};
+
   /// Handles method calls from the native side (events pushed to Dart).
   ///
   /// Dispatches `cameraError`, `cameraClosing`, and `imageStreamFrame`
@@ -98,7 +114,12 @@ class CameraDesktopPlugin extends CameraPlatform {
     switch (call.method) {
       case 'cameraError':
         final cameraId = args!['cameraId']! as int;
-        final description = args['description']! as String;
+        // Every backend sends `description`; macOS before this fix sent only
+        // `message`, which is still accepted.
+        final description =
+            args['description'] as String? ??
+            args['message'] as String? ??
+            'Unknown camera error';
         _eventStreamController.add(CameraErrorEvent(cameraId, description));
       case 'cameraClosing':
         final cameraId = args!['cameraId']! as int;
@@ -254,6 +275,17 @@ class CameraDesktopPlugin extends CameraPlatform {
   /// cleanup always completes.
   @override
   Future<void> dispose(int cameraId) async {
+    // Stop FFI pollers first so nothing reads native buffers during teardown,
+    // even when the image stream subscriber never cancelled.
+    final ffiStreams = _ffiImageStreams.remove(cameraId);
+    if (ffiStreams != null) {
+      for (final MapEntry(key: ffi, value: controller) in ffiStreams.entries) {
+        ffi.dispose();
+        if (!controller.isClosed) {
+          controller.close();
+        }
+      }
+    }
     try {
       await _channel.invokeMethod<void>('dispose', {'cameraId': cameraId});
     } on PlatformException catch (_) {
@@ -392,34 +424,84 @@ class CameraDesktopPlugin extends CameraPlatform {
 
     ImageStreamFfi? ffi;
     int streamHandle = cameraId;
+    // Whether native startImageStream succeeded, so there is a stream to stop.
+    var started = false;
+    var cancelled = false;
+    final startFinished = Completer<void>();
     late final StreamController<CameraImageData> controller;
+
+    void forgetFfi(ImageStreamFfi? reader) {
+      if (reader == null) return;
+      final streams = _ffiImageStreams[cameraId];
+      streams?.remove(reader);
+      if (streams != null && streams.isEmpty) {
+        _ffiImageStreams.remove(cameraId);
+      }
+    }
 
     controller = StreamController<CameraImageData>(
       onListen: () async {
-        final dynamic value = await _channel.invokeMethod<dynamic>(
-          'startImageStream',
-          {'cameraId': cameraId},
-        );
-        streamHandle = extractStreamHandle(value);
-        ffi = ImageStreamFfi.tryCreate(streamHandle);
-        if (ffi == null) {
+        try {
+          final dynamic value = await _channel.invokeMethod<dynamic>(
+            'startImageStream',
+            {'cameraId': cameraId},
+          );
+          streamHandle = extractStreamHandle(value);
+          started = true;
+        } on PlatformException catch (e) {
+          if (!cancelled && !controller.isClosed) {
+            controller.addError(CameraException(e.code, e.message));
+          }
+          return;
+        } on MissingPluginException catch (e) {
+          if (!cancelled && !controller.isClosed) {
+            controller.addError(CameraException('startImageStream', e.message));
+          }
+          return;
+        } finally {
+          startFinished.complete();
+        }
+        // Cancelled (or the camera disposed) while startImageStream was in
+        // flight: onCancel stops the native stream with the real handle, and
+        // no poller may start for a stream nobody listens to.
+        if (cancelled || controller.isClosed) return;
+        final reader = _createImageStreamFfi(streamHandle);
+        if (reader == null) {
           _imageStreamControllers[cameraId] = controller;
         } else {
-          ffi!.start(controller);
+          ffi = reader;
+          (_ffiImageStreams[cameraId] ??= {})[reader] = controller;
+          reader.start(controller);
         }
       },
       onCancel: () async {
-        // Unregister the native callback first so no new frames are dispatched.
-        ffi?.stop();
-        _imageStreamControllers.remove(cameraId);
-        // Tell native to stop streaming; await ensures the native side has
-        // fully stopped before we dispose the FFI poller.
-        await _channel.invokeMethod<void>('stopImageStream', {
-          'cameraId': cameraId,
-          'streamHandle': streamHandle,
-        });
-        // Native has stopped, safe to release FFI resources.
-        ffi?.dispose();
+        cancelled = true;
+        final reader = ffi;
+        ffi = null;
+        // Stop polling and unregister the native callback first so no new
+        // frames are dispatched.
+        reader?.stop();
+        forgetFfi(reader);
+        if (identical(_imageStreamControllers[cameraId], controller)) {
+          _imageStreamControllers.remove(cameraId);
+        }
+        // The native handle is only known once startImageStream replied.
+        await startFinished.future;
+        try {
+          if (started) {
+            // Await so the native side has fully stopped before the FFI
+            // reader is released.
+            await _channel.invokeMethod<void>('stopImageStream', {
+              'cameraId': cameraId,
+              'streamHandle': streamHandle,
+            });
+          }
+        } on PlatformException catch (_) {
+          // The camera may already be disposed (`camera_not_found`); its
+          // native stream is gone either way.
+        } finally {
+          reader?.dispose();
+        }
       },
       onPause: () {},
       onResume: () {},

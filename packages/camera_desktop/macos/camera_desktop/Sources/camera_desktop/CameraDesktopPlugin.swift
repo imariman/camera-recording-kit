@@ -58,21 +58,35 @@ public class CameraDesktopPlugin: NSObject, FlutterPlugin, NSApplicationDelegate
         disposeAllSessions()
     }
 
+    /// Upper bound for finalizing active recordings when the app quits.
+    static let terminationFinalizeTimeout: DispatchTimeInterval = .seconds(5)
+
     /// Called by NSApplication on normal app termination.
+    ///
+    /// The process exits right after this returns, so an active recording is
+    /// finalized synchronously (bounded by `terminationFinalizeTimeout`)
+    /// instead of in the background, where its `moov` atom would be lost.
     public func applicationWillTerminate(_ notification: Notification) {
-        disposeAllSessions()
+        let deadline = DispatchTime.now() + Self.terminationFinalizeTimeout
+        for (cameraId, session) in takeAllSessions() {
+            ImageStreamHandleBridge.releaseHandles(forCameraId: cameraId)
+            session.disposeForTermination(deadline: deadline)
+        }
     }
 
     private func disposeAllSessions() {
+        for (cameraId, session) in takeAllSessions() {
+            ImageStreamHandleBridge.releaseHandles(forCameraId: cameraId)
+            session.dispose()
+        }
+    }
+
+    private func takeAllSessions() -> [Int: CameraSession] {
         sessionsLock.lock()
         let snapshot = sessions
         sessions.removeAll()
         sessionsLock.unlock()
-
-        for (cameraId, session) in snapshot {
-            ImageStreamHandleBridge.releaseHandles(forCameraId: cameraId)
-            session.dispose()
-        }
+        return snapshot
     }
 
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -173,6 +187,10 @@ public class CameraDesktopPlugin: NSObject, FlutterPlugin, NSApplicationDelegate
     }
 
     private func handleCreate(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        // The codec choice is one-shot for the next create attempt. Consume it
+        // before validation so a rejected create cannot leave it pending for
+        // an unrelated later controller.
+        let videoCodec = consumePendingRecordingVideoCodec()
         guard let args = call.arguments as? [String: Any],
               let cameraName = args["cameraName"] as? String,
               let resolutionPreset = args["resolutionPreset"] as? Int else {
@@ -238,7 +256,6 @@ public class CameraDesktopPlugin: NSObject, FlutterPlugin, NSApplicationDelegate
         let cameraId = nextCameraId
         nextCameraId += 1
 
-        let videoCodec = consumePendingRecordingVideoCodec()
         let config = CameraSession.CameraConfig(
             deviceId: deviceId,
             resolutionPreset: resolutionPreset,

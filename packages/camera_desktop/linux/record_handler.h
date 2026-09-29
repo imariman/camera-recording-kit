@@ -4,6 +4,7 @@
 #include <gst/gst.h>
 #include <flutter_linux/flutter_linux.h>
 
+#include <memory>
 #include <string>
 
 // Manages a video recording branch using a tee + valve + encoder + mux pipeline.
@@ -92,6 +93,11 @@ class RecordHandler {
   bool using_matroskamux_ = false;  // H-6: true when mp4mux was unavailable
 
   FlMethodCall* pending_stop_call_;  // Pending stop response.
+
+  // Cleared in the destructor. The EOS idle callback holds a copy and checks
+  // it before touching the handler, which the camera may have disposed while
+  // the stop was still finalizing. Both run on the main thread.
+  std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
 };
 
 #endif  // RECORD_HANDLER_H_

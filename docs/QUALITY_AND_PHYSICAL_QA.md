@@ -34,4 +34,8 @@ Synthetic tests exercise media finalization and Vision/Core Image behavior;
 they do not establish webcam support, permission handling, visual quality, or
 sustained capture performance. Test built-in and external/Continuity cameras,
 unplug/reconnect behavior, and camera/microphone permission denial on real
-hardware before release.
+hardware before release. On macOS, unplugging the camera during a recording
+should finalize the file, emit a `cameraError`, and let `stopVideoRecording`
+return that file; quitting the app while recording should leave a playable
+file; with an external microphone selected as the system input, recordings
+should use it.

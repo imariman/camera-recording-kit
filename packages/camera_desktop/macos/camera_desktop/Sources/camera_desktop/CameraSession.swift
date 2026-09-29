@@ -169,6 +169,11 @@ class CameraSession: NSObject {
     private var _isDisposed = false
     private var latestBuffer: CVPixelBuffer?
 
+    /// A recording that was finalized because the camera disconnected, so a
+    /// later `stopVideoRecording` can still return its file.
+    private let disconnectedRecordingLock = UnfairLock()
+    private var disconnectedRecording: DisconnectedRecording?
+
     private var previewPaused: Bool {
         get { flagsLock.lock(); defer { flagsLock.unlock() }; return _previewPaused }
         set { flagsLock.lock(); _previewPaused = newValue; flagsLock.unlock() }
@@ -179,13 +184,21 @@ class CameraSession: NSObject {
         set { flagsLock.lock(); _imageStreaming = newValue; flagsLock.unlock() }
     }
 
+    private var isDisposed: Bool {
+        flagsLock.lock()
+        defer { flagsLock.unlock() }
+        return _isDisposed
+    }
+
     private var actualWidth: Int = 0
     private var actualHeight: Int = 0
     private var configuredWidth: Int = 0
     private var configuredHeight: Int = 0
     private var firstFrameReceived = false
 
-    /// Pending initialization result callback, called when the first frame arrives.
+    /// Pending initialization result callback, called when the first frame
+    /// arrives. Guarded by `flagsLock` together with `_isDisposed`, so
+    /// `dispose` and `setupSession` agree on who replies to it.
     private var pendingInitResult: FlutterResult?
 
     /// When a focus/exposure point or mode change last restarted metering.
@@ -215,6 +228,9 @@ class CameraSession: NSObject {
         self.textureRegistry = textureRegistry
         self.methodChannel = methodChannel
         super.init()
+        recordHandler.onWriterFailure = { [weak self] description in
+            self?.emitCameraError("Recording failed: \(description)")
+        }
     }
 
     // MARK: - Texture Registration
@@ -233,7 +249,10 @@ class CameraSession: NSObject {
     /// Initializes the AVCaptureSession. Responds asynchronously when the first frame arrives.
     func initialize(result: @escaping FlutterResult) {
         AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-            guard let self = self else { return }
+            guard let self = self else {
+                CameraSession.replyDisposed(result)
+                return
+            }
             if !granted {
                 DispatchQueue.main.async {
                     result(FlutterError(code: "permission_denied",
@@ -244,7 +263,10 @@ class CameraSession: NSObject {
             }
             if self.config.enableAudio {
                 AVCaptureDevice.requestAccess(for: .audio) { [weak self] audioGranted in
-                    guard let self = self else { return }
+                    guard let self = self else {
+                        CameraSession.replyDisposed(result)
+                        return
+                    }
                     guard audioGranted else {
                         DispatchQueue.main.async {
                             result(FlutterError(
@@ -267,7 +289,30 @@ class CameraSession: NSObject {
         }
     }
 
+    /// Replies to an `initialize` call that lost the race with `dispose`.
+    private static func replyDisposed(_ result: @escaping FlutterResult) {
+        DispatchQueue.main.async {
+            result(FlutterError(code: "camera_disposed",
+                                message: "The camera was disposed before initialization finished.",
+                                details: nil))
+        }
+    }
+
+    /// Takes the pending `initialize` reply, if any, so exactly one path
+    /// answers it.
+    private func takePendingInitResult() -> FlutterResult? {
+        flagsLock.lock()
+        defer { flagsLock.unlock() }
+        let pending = pendingInitResult
+        pendingInitResult = nil
+        return pending
+    }
+
     private func setupSession(result: @escaping FlutterResult) {
+        guard !isDisposed else {
+            CameraSession.replyDisposed(result)
+            return
+        }
         let session = AVCaptureSession()
 
         // Resolve the exact selected device. Falling back to another camera can
@@ -324,10 +369,13 @@ class CameraSession: NSObject {
             return
         }
 
-        // Add audio input if enabled.
+        // Add audio input if enabled. Prefer the system default input (the
+        // microphone selected in System Settings, e.g. AirPods or a USB
+        // microphone); before macOS 14 discovery lists only built-in ones.
         if config.enableAudio {
-            let audioDevices = AVCaptureDevice.captureDevices(mediaType: .audio)
-            guard let audioDevice = audioDevices.first else {
+            let audioDevice = AVCaptureDevice.default(for: .audio)
+                ?? AVCaptureDevice.captureDevices(mediaType: .audio).first
+            guard let audioDevice else {
                 DispatchQueue.main.async {
                     result(FlutterError(code: "audio_unavailable",
                                         message: "Audio recording was requested but no microphone is available.",
@@ -410,9 +458,9 @@ class CameraSession: NSObject {
         do {
             try device.lockForConfiguration()
             device.activeFormat = selectedFormat.format
-            let requestedDuration = CMTime(
-                value: 1,
-                timescale: CMTimeScale(selectedFormat.profile.framesPerSecond)
+            let requestedDuration = RecordingQuality.frameDuration(
+                framesPerSecond: selectedFormat.profile.framesPerSecond,
+                on: selectedFormat.format
             )
             device.activeVideoMinFrameDuration = requestedDuration
             device.activeVideoMaxFrameDuration = requestedDuration
@@ -442,7 +490,8 @@ class CameraSession: NSObject {
         guard activeDimensions.width == selectedFormat.profile.width,
               activeDimensions.height == selectedFormat.profile.height,
               let activeFps = activeFps,
-              abs(activeFps - Double(selectedFormat.profile.framesPerSecond)) < 0.01 else {
+              RecordingQuality.matches(frameRate: activeFps,
+                                       requested: selectedFormat.profile.framesPerSecond) else {
             DispatchQueue.main.async {
                 result(FlutterError(code: "unsupportedRecordingProfile",
                                     message: "AVFoundation applied a different format or frame rate than requested.",
@@ -453,7 +502,18 @@ class CameraSession: NSObject {
         configuredWidth = Int(activeDimensions.width)
         configuredHeight = Int(activeDimensions.height)
 
-        // Subscribe to runtime error and interruption notifications.
+        // Register the pending reply under the same lock `dispose` uses, so
+        // a concurrent dispose either sees it (and fails it) or is seen here.
+        flagsLock.lock()
+        if _isDisposed {
+            flagsLock.unlock()
+            CameraSession.replyDisposed(result)
+            return
+        }
+        pendingInitResult = result
+        flagsLock.unlock()
+
+        // Subscribe to runtime error, interruption and disconnect notifications.
         let nc = NotificationCenter.default
         nc.addObserver(self,
                        selector: #selector(sessionRuntimeError(_:)),
@@ -467,9 +527,12 @@ class CameraSession: NSObject {
                        selector: #selector(sessionInterruptionEnded(_:)),
                        name: .AVCaptureSessionInterruptionEnded,
                        object: session)
+        nc.addObserver(self,
+                       selector: #selector(videoDeviceWasDisconnected(_:)),
+                       name: AVCaptureDevice.wasDisconnectedNotification,
+                       object: device)
 
         captureSession = session
-        pendingInitResult = result
         firstFrameReceived = false
 
         // Start running, the first frame callback will respond to the pending result.
@@ -477,37 +540,82 @@ class CameraSession: NSObject {
 
         // Timeout: if no frame arrives in 15 seconds, fail.
         DispatchQueue.main.asyncAfter(deadline: .now() + 15.0) { [weak self] in
-            guard let self = self, let pending = self.pendingInitResult else { return }
-            self.pendingInitResult = nil
+            guard let self = self, let pending = self.takePendingInitResult() else { return }
             pending(FlutterError(code: "initialization_timeout",
                                  message: "Camera initialization timed out, no frames received",
                                  details: nil))
         }
     }
 
-    @objc private func sessionRuntimeError(_ notification: Notification) {
-        let error = notification.userInfo?[AVCaptureSessionErrorKey] as? Error
-        let message = error?.localizedDescription ?? "Unknown runtime error"
+    /// Sends a `cameraError` event to Dart. `description` is the key every
+    /// backend and the Dart handler use; `message` is kept for older Dart
+    /// code that read the previous macOS key.
+    private func emitCameraError(_ description: String) {
         DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
+            guard let self = self, !self.isDisposed else { return }
             self.methodChannel?.invokeMethod("cameraError", arguments: [
                 "cameraId": self.cameraId,
-                "message": message,
+                "description": description,
+                "message": description,
             ])
         }
+    }
+
+    @objc private func sessionRuntimeError(_ notification: Notification) {
+        let error = notification.userInfo?[AVCaptureSessionErrorKey] as? Error
+        emitCameraError(error?.localizedDescription ?? "Unknown runtime error")
     }
 
     @objc private func sessionWasInterrupted(_ notification: Notification) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.methodChannel?.invokeMethod("cameraError", arguments: [
-                "cameraId": self.cameraId,
-                "message": "Camera session interrupted",
-            ])
+        emitCameraError("Camera session interrupted")
+    }
+
+    /// AVFoundation normally resumes an interrupted session by itself; restart
+    /// it if it stopped while interrupted.
+    @objc private func sessionInterruptionEnded(_ notification: Notification) {
+        sessionQueue.async { [weak self] in
+            guard let self = self, !self.isDisposed,
+                  let session = self.captureSession, !session.isRunning else { return }
+            session.startRunning()
         }
     }
 
-    @objc private func sessionInterruptionEnded(_ notification: Notification) {
+    /// The active camera was unplugged or became unavailable. Frames stop, so
+    /// finalize an active recording instead of continuing with audio only,
+    /// and tell Dart. A later `stopVideoRecording` returns that file.
+    @objc private func videoDeviceWasDisconnected(_ notification: Notification) {
+        guard !isDisposed else { return }
+        if recordHandler.isRecording {
+            let recording = DisconnectedRecording()
+            disconnectedRecordingLock.lock()
+            disconnectedRecording = recording
+            disconnectedRecordingLock.unlock()
+            let cameraId = self.cameraId
+            let stopped = recordHandler.stopRecording { path in
+                if let path = path {
+                    NSLog("camera_desktop: camera %ld was disconnected while recording; "
+                          + "the finalized file was kept at %@", cameraId, path)
+                }
+                recording.finish(path: path)
+            }
+            if !stopped {
+                // Dart stopped the recording first; nothing to hand over.
+                disconnectedRecordingLock.lock()
+                if disconnectedRecording === recording { disconnectedRecording = nil }
+                disconnectedRecordingLock.unlock()
+            }
+            emitCameraError("The camera was disconnected. The recording was stopped and finalized.")
+        } else {
+            emitCameraError("The camera was disconnected.")
+        }
+    }
+
+    private func takeDisconnectedRecording() -> DisconnectedRecording? {
+        disconnectedRecordingLock.lock()
+        defer { disconnectedRecordingLock.unlock() }
+        let recording = disconnectedRecording
+        disconnectedRecording = nil
+        return recording
     }
 
     // MARK: - Photo Capture
@@ -523,10 +631,19 @@ class CameraSession: NSObject {
                                 details: nil))
             return
         }
+        // Encode a private copy: the latest frame may belong to the bounded
+        // stabilizer pool, and holding it during JPEG encoding would starve
+        // the preview and recording of output buffers.
+        guard let photoBuffer = PixelBufferCopy.copy(buffer) else {
+            result(FlutterError(code: "capture_failed",
+                                message: "Could not copy the frame for capture",
+                                details: nil))
+            return
+        }
 
         let path = PhotoHandler.generatePath(cameraId: cameraId)
         sessionQueue.async {
-            let success = PhotoHandler.takePicture(from: buffer, outputPath: path)
+            let success = PhotoHandler.takePicture(from: photoBuffer, outputPath: path)
             DispatchQueue.main.async {
                 if success {
                     result(path)
@@ -545,6 +662,8 @@ class CameraSession: NSObject {
         let enableAudio = config.enableAudio
 
         sessionQueue.async { [self] in
+            // A new recording supersedes one finalized by a disconnect.
+            _ = self.takeDisconnectedRecording()
             do {
                 self.bufferLock.lock()
                 let recordingWidth = self.actualWidth
@@ -614,6 +733,10 @@ class CameraSession: NSObject {
 
     func stopVideoRecording(result: @escaping FlutterResult) {
         guard recordHandler.isRecording else {
+            if let recording = takeDisconnectedRecording() {
+                recording.deliver(to: result)
+                return
+            }
             result(FlutterError(code: "not_recording",
                                 message: "No recording in progress",
                                 details: nil))
@@ -621,14 +744,18 @@ class CameraSession: NSObject {
         }
 
         recordHandler.stopRecording { path in
-            DispatchQueue.main.async {
-                if let path = path {
-                    result(path)
-                } else {
-                    result(FlutterError(code: "recording_failed",
-                                        message: "Failed to finalize recording",
-                                        details: nil))
-                }
+            CameraSession.replyStoppedRecording(result, path: path)
+        }
+    }
+
+    fileprivate static func replyStoppedRecording(_ result: @escaping FlutterResult, path: String?) {
+        DispatchQueue.main.async {
+            if let path = path {
+                result(path)
+            } else {
+                result(FlutterError(code: "recording_failed",
+                                    message: "Failed to finalize recording",
+                                    details: nil))
             }
         }
     }
@@ -1057,8 +1184,9 @@ class CameraSession: NSObject {
     ///
     /// Synchronously unregisters the FFI callback, stops image streaming, stops
     /// the AVCaptureSession (which blocks until all in-flight delegate calls
-    /// complete), and tears down the session graph. After this method returns,
-    /// the capture queue will not invoke any more callbacks.
+    /// complete), and tears down the session graph on `sessionQueue`. After
+    /// this method returns, the capture queue will not invoke any more
+    /// callbacks. A pending `initialize` call fails with `camera_disposed`.
     /// Texture unregistration and the cameraClosing event are dispatched to the
     /// main queue as they require UI-thread access.
     ///
@@ -1067,25 +1195,11 @@ class CameraSession: NSObject {
     /// the file to be complete. It runs immediately when nothing was recording,
     /// and never runs for a repeated call.
     func dispose(completion: (() -> Void)? = nil) {
-        // Idempotency guard, first caller wins.
-        flagsLock.lock()
-        if _isDisposed { flagsLock.unlock(); return }
-        _isDisposed = true
-        _imageStreaming = false
-        flagsLock.unlock()
-
-
-        // Null out the FFI callback under lock, guarantees no in-flight
-        // invocation reaches Dart after this returns.
-        imageStreamFFI.unregisterCallback()
-
-        // Remove notification observers before stopping the session.
-        NotificationCenter.default.removeObserver(self)
+        guard beginDispose() else { return }
 
         // CameraService stops and hands over any recording before disposing, so
-        // this only finalizes one when a host disposes the controller directly
-        // or the app terminates. Keep the valid file and log its path instead
-        // of dropping it silently.
+        // this only finalizes one when a host disposes the controller directly.
+        // Keep the valid file and log its path instead of dropping it silently.
         let cameraId = self.cameraId
         if recordHandler.isRecording {
             recordHandler.stopRecording { path in
@@ -1098,18 +1212,72 @@ class CameraSession: NSObject {
         } else {
             DispatchQueue.main.async { completion?() }
         }
-        // stopRunning() blocks until all in-flight AVCaptureOutput delegate
-        // calls have returned, so after this line captureOutput() cannot fire.
-        captureSession?.stopRunning()
-        captureQueue.sync {
-            self.finishPendingStabilization(error: "Camera was disposed.")
-            self.videoStabilizer = nil
-            self.stabilizationVerified = false
+        finishDispose()
+    }
+
+    /// Disposes the session during app termination, blocking the calling
+    /// (main) thread until an active recording is finalized or `deadline`
+    /// passes. The wait never depends on the main queue or run loop, which
+    /// do not turn while `applicationWillTerminate` runs.
+    func disposeForTermination(deadline: DispatchTime) {
+        guard beginDispose() else { return }
+        if let outcome = recordHandler.stopRecordingAndWait(deadline: deadline) {
+            if !outcome.finished {
+                NSLog("camera_desktop: camera %ld is still finalizing a recording at app "
+                      + "termination; the file is recoverable up to its last movie fragment.",
+                      cameraId)
+            } else if let path = outcome.path {
+                NSLog("camera_desktop: camera %ld was recording at app termination; "
+                      + "the finalized file was kept at %@", cameraId, path)
+            }
         }
-        captureSession = nil
-        videoDevice = nil
-        videoOutput = nil
-        audioOutput = nil
+        finishDispose()
+    }
+
+    /// Marks the session disposed and fails a pending `initialize`. Returns
+    /// false for a repeated call.
+    private func beginDispose() -> Bool {
+        // Idempotency guard, first caller wins.
+        flagsLock.lock()
+        if _isDisposed { flagsLock.unlock(); return false }
+        _isDisposed = true
+        _imageStreaming = false
+        let pendingInit = pendingInitResult
+        pendingInitResult = nil
+        flagsLock.unlock()
+
+        if let pendingInit = pendingInit {
+            CameraSession.replyDisposed(pendingInit)
+        }
+
+        // Null out the FFI callback under lock, guarantees no in-flight
+        // invocation reaches Dart after this returns.
+        imageStreamFFI.unregisterCallback()
+        return true
+    }
+
+    /// Stops capture and releases the session graph.
+    private func finishDispose() {
+        // The session graph is owned by `sessionQueue`; tear it down there so
+        // no queued control call races with the fields being cleared. No
+        // `sessionQueue` block waits for the main queue, so this cannot
+        // deadlock, and a running `setupSession` completes first.
+        sessionQueue.sync {
+            // Remove notification observers before stopping the session.
+            NotificationCenter.default.removeObserver(self)
+            // stopRunning() blocks until all in-flight AVCaptureOutput delegate
+            // calls have returned, so after this line captureOutput() cannot fire.
+            self.captureSession?.stopRunning()
+            self.captureQueue.sync {
+                self.finishPendingStabilization(error: "Camera was disposed.")
+                self.videoStabilizer = nil
+                self.stabilizationVerified = false
+            }
+            self.captureSession = nil
+            self.videoDevice = nil
+            self.videoOutput = nil
+            self.audioOutput = nil
+        }
 
         // The plugin has removed this session from its registry. Retain it
         // until the main-thread texture cleanup finishes, including when a
@@ -1121,6 +1289,39 @@ class CameraSession: NSObject {
             self.texture = nil
             self.methodChannel?.invokeMethod("cameraClosing", arguments: ["cameraId": self.cameraId])
         }
+    }
+}
+
+/// The result of a recording finalized after the camera disconnected, handed
+/// to the next `stopVideoRecording` call whether or not finalization is done.
+private final class DisconnectedRecording {
+    private let lock = UnfairLock()
+    private var finished = false
+    private var path: String?
+    private var waiters: [FlutterResult] = []
+
+    func finish(path: String?) {
+        lock.lock()
+        finished = true
+        self.path = path
+        let pending = waiters
+        waiters = []
+        lock.unlock()
+        for result in pending {
+            CameraSession.replyStoppedRecording(result, path: path)
+        }
+    }
+
+    func deliver(to result: @escaping FlutterResult) {
+        lock.lock()
+        guard finished else {
+            waiters.append(result)
+            lock.unlock()
+            return
+        }
+        let finishedPath = path
+        lock.unlock()
+        CameraSession.replyStoppedRecording(result, path: finishedPath)
     }
 }
 
@@ -1175,10 +1376,9 @@ extension CameraSession: AVCaptureVideoDataOutputSampleBufferDelegate,
                   activeDimensions?.width == Int32(configuredWidth),
                   activeDimensions?.height == Int32(configuredHeight),
                   let activeFps = activeFps,
-                  abs(activeFps - Double(config.targetFps)) < 0.01 else {
+                  RecordingQuality.matches(frameRate: activeFps, requested: config.targetFps) else {
                 DispatchQueue.main.async { [weak self] in
-                    guard let self = self, let pending = self.pendingInitResult else { return }
-                    self.pendingInitResult = nil
+                    guard let self = self, let pending = self.takePendingInitResult() else { return }
                     pending(FlutterError(
                         code: "unsupportedRecordingProfile",
                         message: "Capture did not preserve the requested \(self.configuredWidth)x\(self.configuredHeight) at \(self.config.targetFps) FPS profile.",
@@ -1193,14 +1393,17 @@ extension CameraSession: AVCaptureVideoDataOutputSampleBufferDelegate,
             actualHeight = height
             bufferLock.unlock()
 
+            // Read the device here: `videoDevice` is cleared on `sessionQueue`
+            // only after capture stops, never while this callback runs.
+            let supportsExposurePoint = videoDevice?.isExposurePointOfInterestSupported ?? false
+            let supportsFocusPoint = videoDevice?.isFocusPointOfInterestSupported ?? false
             DispatchQueue.main.async { [weak self] in
-                guard let self = self, let pending = self.pendingInitResult else { return }
-                self.pendingInitResult = nil
+                guard let self = self, let pending = self.takePendingInitResult() else { return }
                 pending([
                     "previewWidth": Double(width),
                     "previewHeight": Double(height),
-                    "supportsExposurePoint": self.videoDevice?.isExposurePointOfInterestSupported ?? false,
-                    "supportsFocusPoint": self.videoDevice?.isFocusPointOfInterestSupported ?? false,
+                    "supportsExposurePoint": supportsExposurePoint,
+                    "supportsFocusPoint": supportsFocusPoint,
                 ])
             }
         }

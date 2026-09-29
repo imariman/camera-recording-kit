@@ -269,10 +269,54 @@ enum RecordingQuality {
         }
     }
 
+    /// UVC cameras often report NTSC-style or rounded rates (29.97, 30.00003,
+    /// 59.94) for what is a 30 or 60 FPS mode. Rates this close to the
+    /// requested one count as that profile. 0.1 FPS covers 60000/1001.
+    static let frameRateTolerance = 0.1
+
     static func supports(frameRate: Double, on format: AVCaptureDevice.Format) -> Bool {
         return format.videoSupportedFrameRateRanges.contains {
-            Double($0.minFrameRate) <= frameRate && frameRate <= Double($0.maxFrameRate)
+            supports(
+                frameRate: frameRate,
+                minFrameRate: Double($0.minFrameRate),
+                maxFrameRate: Double($0.maxFrameRate)
+            )
         }
+    }
+
+    static func supports(frameRate: Double, minFrameRate: Double, maxFrameRate: Double) -> Bool {
+        return minFrameRate - frameRateTolerance <= frameRate
+            && frameRate <= maxFrameRate + frameRateTolerance
+    }
+
+    /// Whether a measured or applied rate matches the requested one.
+    static func matches(frameRate: Double, requested: Int) -> Bool {
+        return abs(frameRate - Double(requested)) <= frameRateTolerance
+    }
+
+    /// The frame duration to apply for `framesPerSecond` on `format`.
+    /// AVFoundation raises an exception for a duration outside every
+    /// supported range, so a rate accepted only within the tolerance is
+    /// clamped to the nearest bound of its range.
+    static func frameDuration(framesPerSecond: Int, on format: AVCaptureDevice.Format) -> CMTime {
+        let requested = CMTime(value: 1, timescale: CMTimeScale(framesPerSecond))
+        let ranges = format.videoSupportedFrameRateRanges
+        let fps = Double(framesPerSecond)
+        if ranges.contains(where: { Double($0.minFrameRate) <= fps && fps <= Double($0.maxFrameRate) }) {
+            return requested
+        }
+        guard let range = ranges.first(where: {
+            supports(frameRate: fps, minFrameRate: Double($0.minFrameRate), maxFrameRate: Double($0.maxFrameRate))
+        }) else {
+            return requested
+        }
+        return clamp(requested, minimum: range.minFrameDuration, maximum: range.maxFrameDuration)
+    }
+
+    static func clamp(_ duration: CMTime, minimum: CMTime, maximum: CMTime) -> CMTime {
+        if CMTimeCompare(duration, minimum) < 0 { return minimum }
+        if CMTimeCompare(duration, maximum) > 0 { return maximum }
+        return duration
     }
 
     static func supportsEncoding(profile: Profile, codec: VideoCodec = .h264) -> Bool {

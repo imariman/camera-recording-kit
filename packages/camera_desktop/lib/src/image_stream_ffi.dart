@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:camera_platform_interface/camera_platform_interface.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 /// FFI struct matching the native ImageStreamBuffer layout (32-byte header).
 ///
@@ -53,6 +54,10 @@ typedef _GetBufferNative = Pointer<Void> Function(Int64 streamHandle);
 /// Dart-side function type for [_GetBufferNative].
 typedef _GetBufferDart = Pointer<Void> Function(int streamHandle);
 
+/// The native frame-ready callback type registered with the shared buffer.
+typedef ImageStreamNativeCallback =
+    Pointer<NativeFunction<Void Function(Int32)>>;
+
 /// Native function signature for registering a frame-ready callback.
 typedef _RegisterCallbackNative =
     Void Function(
@@ -90,6 +95,25 @@ class ImageStreamFfi {
     this._nativeNoopCallback,
   );
 
+  /// Creates a stream reader over explicit native bindings.
+  ///
+  /// Lets tests drive the shared-buffer protocol with a fake native side.
+  @visibleForTesting
+  ImageStreamFfi.withBindings({
+    required int streamHandle,
+    required Pointer<Void> Function(int streamHandle) getBuffer,
+    required void Function(int streamHandle, ImageStreamNativeCallback callback)
+    registerCallback,
+    required void Function(int streamHandle) unregisterCallback,
+    ImageStreamNativeCallback? nativeNoopCallback,
+  }) : this._(
+         streamHandle,
+         getBuffer,
+         registerCallback,
+         unregisterCallback,
+         nativeNoopCallback ?? nullptr,
+       );
+
   /// The native stream handle used to identify this stream to native code.
   final int _streamHandle;
 
@@ -121,6 +145,12 @@ class ImageStreamFfi {
 
   /// The sequence number of the last frame delivered, used to skip duplicates.
   int _lastSequence = 0;
+
+  /// Whether the native callback is currently registered.
+  bool _registered = false;
+
+  /// Set by [dispose]; a disposed reader never polls or registers again.
+  bool _disposed = false;
 
   /// Attempts to set up the FFI image stream.
   ///
@@ -182,12 +212,18 @@ class ImageStreamFfi {
   ///
   /// Using a native callback symbol (instead of [NativeCallable.listener])
   /// avoids stale Dart callback metadata crashes during hot restart.
+  ///
+  /// A frame already in the shared buffer when this is called belongs to an
+  /// earlier stream (native keeps the last frame across restarts), so only
+  /// frames with a newer sequence number are delivered.
   void start(StreamController<CameraImageData> controller) {
+    if (_disposed) return;
     _controller = controller;
-    _lastSequence = 0;
+    _lastSequence = _currentSequence();
     _pollInProgress = false;
 
     _registerCallback(_streamHandle, _nativeNoopCallback);
+    _registered = true;
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(
       const Duration(milliseconds: 8),
@@ -196,9 +232,17 @@ class ImageStreamFfi {
     _pollForFrame();
   }
 
+  /// The sequence number of the frame currently published by native, or 0.
+  int _currentSequence() {
+    final bufPtr = _getBuffer(_streamHandle);
+    if (bufPtr == nullptr) return 0;
+    final buf = bufPtr.cast<ImageStreamBuffer>().ref;
+    return buf.ready == 1 ? buf.sequence : 0;
+  }
+
   /// Polls for one new frame and emits it if sequence has advanced.
   void _pollForFrame() {
-    if (_pollInProgress) return;
+    if (_pollInProgress || _disposed) return;
     _pollInProgress = true;
     try {
       _readLatestFrame();
@@ -221,8 +265,9 @@ class ImageStreamFfi {
     final buf = bufPtr.cast<ImageStreamBuffer>().ref;
     if (buf.ready != 1) return;
 
-    if (buf.sequence <= _lastSequence) return;
-    _lastSequence = buf.sequence;
+    final sequence = buf.sequence;
+    if (sequence <= _lastSequence) return;
+    _lastSequence = sequence;
 
     final width = buf.width;
     final height = buf.height;
@@ -234,6 +279,11 @@ class ImageStreamFfi {
     final nativeView = pixelsPtr.asTypedList(dataSize);
 
     final bytes = Uint8List.fromList(nativeView);
+
+    // Native may have started overwriting this buffer during the copy (Linux
+    // uses a single buffer; macOS and Windows reuse theirs after the next
+    // frame). Drop a torn frame; the next poll reads the newer one.
+    if (buf.ready != 1 || buf.sequence != sequence) return;
 
     final rawFormat = format == 0 ? 'BGRA' : 'RGBA';
 
@@ -255,16 +305,20 @@ class ImageStreamFfi {
     );
   }
 
-  /// Unregisters the native callback.
+  /// Stops polling and unregisters the native callback.
   void stop() {
     _pollTimer?.cancel();
     _pollTimer = null;
-    _unregisterCallback(_streamHandle);
+    if (_registered) {
+      _registered = false;
+      _unregisterCallback(_streamHandle);
+    }
   }
 
-  /// Releases all resources.
+  /// Releases all resources. Safe to call more than once.
   void dispose() {
     stop();
+    _disposed = true;
     _controller = null;
   }
 }

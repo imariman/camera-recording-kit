@@ -161,10 +161,12 @@ No profile above 4K is advertised or selected.
 480p, 720p, 1080p, and 2160p formats. An explicit FPS must be 30 or 60. If the
 camera and encoder cannot apply that exact pair, initialization fails with
 `unsupportedRecordingProfile`; AVFoundation is not allowed to silently choose
-a different format. Initialization also verifies the first capture sample's
+a different format. Camera modes reported within 0.1 FPS of the request (for
+example 29.97 or 59.94 on UVC cameras) count as that rate. Initialization also verifies the first capture sample's
 dimensions before reporting the camera ready. When audio is enabled, missing
 microphone permission or capture support fails initialization rather than
-creating a silent recording.
+creating a silent recording. The system default input selected in System
+Settings (for example AirPods or a USB microphone) is preferred.
 
 `recordingQualityApplied` reports first-sample dimensions and the configured
 active-format dimensions/frame duration. Final MP4 inspection reports track
@@ -182,6 +184,15 @@ macOS recording pause/resume removes paused time from both audio and video
 using the capture session clock, preserving one synchronized MP4. Stopping
 while paused finalizes that file. Other desktop platforms retain their existing
 unsupported pause behavior.
+
+macOS writes fragmented MP4 (one-second fragments), so an interrupted
+recording stays readable up to its last fragment. Runtime problems reach Dart
+as `cameraError` events (`CameraController.value.errorDescription`): session
+errors and interruptions, a writer failure during recording (reported once;
+`stopVideoRecording` then returns the partial file if it is still readable),
+and a camera disconnect. A disconnect during recording finalizes the file, and
+the next `stopVideoRecording` returns it. On app quit an active recording is
+finalized for up to five seconds before the app exits.
 
 `getSupportedVideoStabilizationModes` exposes `off` and, at up to 1080p30,
 `level1`. On macOS, level 1 is software translation correction using Vision and

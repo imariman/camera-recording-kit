@@ -49,6 +49,7 @@ RecordHandler::RecordHandler()
       pending_stop_call_(nullptr) {}
 
 RecordHandler::~RecordHandler() {
+  *alive_ = false;
   if (pending_stop_call_) {
     g_object_unref(pending_stop_call_);
     pending_stop_call_ = nullptr;
@@ -325,6 +326,7 @@ bool RecordHandler::StartRecording(const std::string& output_path,
 
 struct StopRecordingData {
   RecordHandler* handler;
+  std::shared_ptr<bool> handler_alive;
   FlMethodCall* method_call;
   std::string output_path;
   std::string container;
@@ -358,7 +360,11 @@ GstPadProbeReturn RecordHandler::OnEosEvent(GstPad* pad,
         fl_method_call_respond_success(data->method_call, result, nullptr);
         g_object_unref(data->method_call);
 
-        data->handler->is_recording_ = false;
+        // The camera (and this handler) may have been disposed while the
+        // file was finalizing.
+        if (*data->handler_alive) {
+          data->handler->is_recording_ = false;
+        }
         delete data;
         return G_SOURCE_REMOVE;
       },
@@ -381,6 +387,7 @@ void RecordHandler::StopRecording(FlMethodCall* method_call) {
 
   StopRecordingData* data = new StopRecordingData();
   data->handler = this;
+  data->handler_alive = alive_;
   data->method_call = FL_METHOD_CALL(g_object_ref(method_call));
   data->output_path = output_path_;
   data->container = output_extension();
