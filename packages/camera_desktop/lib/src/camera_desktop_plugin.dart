@@ -98,7 +98,12 @@ class CameraDesktopPlugin extends CameraPlatform {
     switch (call.method) {
       case 'cameraError':
         final cameraId = args!['cameraId']! as int;
-        final description = args['description']! as String;
+        // Every backend sends `description`; macOS before this fix sent only
+        // `message`, which is still accepted.
+        final description =
+            args['description'] as String? ??
+            args['message'] as String? ??
+            'Unknown camera error';
         _eventStreamController.add(CameraErrorEvent(cameraId, description));
       case 'cameraClosing':
         final cameraId = args!['cameraId']! as int;

@@ -485,26 +485,27 @@ class CameraSession: NSObject {
         }
     }
 
-    @objc private func sessionRuntimeError(_ notification: Notification) {
-        let error = notification.userInfo?[AVCaptureSessionErrorKey] as? Error
-        let message = error?.localizedDescription ?? "Unknown runtime error"
+    /// Sends a `cameraError` event to Dart. `description` is the key every
+    /// backend and the Dart handler use; `message` is kept for older Dart
+    /// code that read the previous macOS key.
+    private func emitCameraError(_ description: String) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.methodChannel?.invokeMethod("cameraError", arguments: [
                 "cameraId": self.cameraId,
-                "message": message,
+                "description": description,
+                "message": description,
             ])
         }
     }
 
+    @objc private func sessionRuntimeError(_ notification: Notification) {
+        let error = notification.userInfo?[AVCaptureSessionErrorKey] as? Error
+        emitCameraError(error?.localizedDescription ?? "Unknown runtime error")
+    }
+
     @objc private func sessionWasInterrupted(_ notification: Notification) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.methodChannel?.invokeMethod("cameraError", arguments: [
-                "cameraId": self.cameraId,
-                "message": "Camera session interrupted",
-            ])
-        }
+        emitCameraError("Camera session interrupted")
     }
 
     @objc private func sessionInterruptionEnded(_ notification: Notification) {

@@ -1,3 +1,10 @@
+## Unreleased
+
+* macOS: `cameraError` events now carry the `description` key that the Dart
+  handler and the other backends use (`message` is still sent), so session
+  runtime errors and interruptions reach `CameraController.value.errorDescription`.
+  The Dart handler also accepts the legacy `message` key (#22).
+
 ## 1.2.1
 
 * Adds macOS encoder-validated H.264/HEVC capability metadata and one-shot
