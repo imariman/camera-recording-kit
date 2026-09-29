@@ -3442,7 +3442,7 @@ void main() {
 
       // Simulate video recording being finalized so stopVideoRecording completes.
       AndroidCameraCameraX.videoRecordingEventStreamController.add(
-        VideoRecordEventFinalize.pigeon_detached(),
+        VideoRecordEventFinalize.pigeon_detached(error: 0),
       );
 
       final XFile file = await camera.stopVideoRecording(0);
@@ -3487,7 +3487,7 @@ void main() {
       await expectLater(() async {
         // Simulate video recording being finalized so stopVideoRecording completes.
         AndroidCameraCameraX.videoRecordingEventStreamController.add(
-          VideoRecordEventFinalize.pigeon_detached(),
+          VideoRecordEventFinalize.pigeon_detached(error: 0),
         );
         await camera.stopVideoRecording(0);
       }, throwsA(isA<CameraException>()));
@@ -3510,7 +3510,7 @@ void main() {
 
       // Simulate video recording being finalized so stopVideoRecording completes.
       AndroidCameraCameraX.videoRecordingEventStreamController.add(
-        VideoRecordEventFinalize.pigeon_detached(),
+        VideoRecordEventFinalize.pigeon_detached(error: 0),
       );
 
       final XFile file = await camera.stopVideoRecording(0);
@@ -3519,6 +3519,274 @@ void main() {
       await expectLater(() async {
         await camera.stopVideoRecording(0);
       }, throwsA(isA<CameraException>()));
+    });
+
+    group('finalize errors', () {
+      const outputPath = '/data/cache/REC42.mp4';
+      const outputUri = 'file://$outputPath';
+
+      Matcher throwsRecordingFailure(String description) => throwsA(
+        isA<CameraException>()
+            .having(
+              (CameraException e) => e.code,
+              'code',
+              AndroidCameraCameraX.videoRecordingFailedErrorCode,
+            )
+            .having(
+              (CameraException e) => e.description,
+              'description',
+              contains(description),
+            ),
+      );
+
+      /// Sets up [camera] so [AndroidCameraCameraX.startVideoCapturing]
+      /// starts [recording] written to [outputPath].
+      void setUpForStartingRecording(
+        AndroidCameraCameraX camera,
+        Recording recording,
+      ) {
+        final mockPendingRecording = MockPendingRecording();
+        camera.processCameraProvider = MockProcessCameraProvider();
+        camera.recorder = MockRecorder();
+        camera.videoCapture = MockVideoCapture();
+        camera.cameraSelector = MockCameraSelector();
+        camera.imageAnalysis = MockImageAnalysis();
+        camera.enableRecordingAudio = false;
+
+        PigeonOverrides.systemServicesManager_new =
+            ({
+              required void Function(SystemServicesManager, String)
+              onCameraError,
+            }) {
+              final mockSystemServicesManager = MockSystemServicesManager();
+              when(
+                mockSystemServicesManager.getTempFilePath(
+                  camera.videoPrefix,
+                  '.mp4',
+                ),
+              ).thenAnswer((_) async => outputPath);
+              return mockSystemServicesManager;
+            };
+        PigeonOverrides.deviceOrientationManager_new =
+            ({
+              required void Function(DeviceOrientationManager, String)
+              onDeviceOrientationChanged,
+            }) => MockDeviceOrientationManager();
+        PigeonOverrides.videoRecordEventListener_new =
+            ({
+              required void Function(VideoRecordEventListener, VideoRecordEvent)
+              onEvent,
+            }) {
+              return VideoRecordEventListener.pigeon_detached(onEvent: onEvent);
+            };
+
+        when(
+          camera.recorder!.prepareRecording(outputPath),
+        ).thenAnswer((_) async => mockPendingRecording);
+        when(
+          mockPendingRecording.asPersistentRecording(),
+        ).thenAnswer((_) async => mockPendingRecording);
+        when(
+          mockPendingRecording.withAudioEnabled(any),
+        ).thenAnswer((_) async => mockPendingRecording);
+        when(
+          mockPendingRecording.start(any),
+        ).thenAnswer((_) async => recording);
+        when(
+          camera.processCameraProvider!.isBound(camera.videoCapture!),
+        ).thenAnswer((_) async => true);
+        when(
+          camera.processCameraProvider!.isBound(camera.imageAnalysis!),
+        ).thenAnswer((_) async => false);
+      }
+
+      /// Sets up [camera] as if a recording to [outputPath] is in progress.
+      MockRecording setUpActiveRecording(AndroidCameraCameraX camera) {
+        final recording = MockRecording();
+        camera.processCameraProvider = MockProcessCameraProvider();
+        camera.videoCapture = MockVideoCapture();
+        camera.recording = recording;
+        camera.pendingRecording = MockPendingRecording();
+        camera.videoOutputPath = outputPath;
+        return recording;
+      }
+
+      test(
+        'startVideoCapturing throws and clears the recording when it is finalized before it starts',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpForStartingRecording(camera, MockRecording());
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(
+              error: 7,
+              outputUri: outputUri,
+            ),
+          );
+
+          await expectLater(
+            camera.startVideoCapturing(const VideoCaptureOptions(1)),
+            throwsRecordingFailure('error code 7 (ERROR_RECORDER_ERROR)'),
+          );
+          expect(camera.recording, isNull);
+          expect(camera.pendingRecording, isNull);
+          expect(camera.videoOutputPath, isNull);
+        },
+      );
+
+      test(
+        'startVideoCapturing throws when a finalize without output URI arrives before start',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpForStartingRecording(camera, MockRecording());
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(error: 4),
+          );
+
+          await expectLater(
+            camera.startVideoCapturing(const VideoCaptureOptions(1)),
+            throwsRecordingFailure('error code 4 (ERROR_SOURCE_INACTIVE)'),
+          );
+          expect(camera.recording, isNull);
+          expect(camera.pendingRecording, isNull);
+        },
+      );
+
+      test(
+        'startVideoCapturing ignores a finalize of an earlier recording',
+        () async {
+          final camera = AndroidCameraCameraX();
+          final recording = MockRecording();
+          setUpForStartingRecording(camera, recording);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController
+            ..add(
+              VideoRecordEventFinalize.pigeon_detached(
+                error: 4,
+                outputUri: 'file:///data/cache/REC41.mp4',
+              ),
+            )
+            ..add(VideoRecordEventStart.pigeon_detached());
+
+          await camera.startVideoCapturing(const VideoCaptureOptions(1));
+
+          expect(camera.recording, recording);
+          expect(camera.videoOutputPath, outputPath);
+        },
+      );
+
+      test(
+        'stopVideoRecording throws with the error code and cleans up when the recording is finalized with an error',
+        () async {
+          final camera = AndroidCameraCameraX();
+          final MockRecording recording = setUpActiveRecording(camera);
+          final recordedEvents = <VideoRecordedEvent>[];
+          final StreamSubscription<VideoRecordedEvent> subscription = camera
+              .onVideoRecordedEvent(0)
+              .listen(recordedEvents.add);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(
+              error: 3,
+              outputUri: outputUri,
+            ),
+          );
+
+          await expectLater(
+            camera.stopVideoRecording(0),
+            throwsRecordingFailure('error code 3 (ERROR_INSUFFICIENT_STORAGE)'),
+          );
+          verify(recording.close());
+          expect(camera.recording, isNull);
+          expect(camera.pendingRecording, isNull);
+          await Future<void>.delayed(Duration.zero);
+          expect(recordedEvents, isEmpty);
+          await subscription.cancel();
+        },
+      );
+
+      test(
+        'stopVideoRecording throws for a recording without valid data',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpActiveRecording(camera);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(error: 8),
+          );
+
+          await expectLater(
+            camera.stopVideoRecording(0),
+            throwsRecordingFailure('error code 8 (ERROR_NO_VALID_DATA)'),
+          );
+          expect(camera.recording, isNull);
+        },
+      );
+
+      test(
+        'stopVideoRecording returns the file of a recording finalized because its source became inactive',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpActiveRecording(camera);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController.add(
+            VideoRecordEventFinalize.pigeon_detached(
+              error: 4,
+              outputUri: outputUri,
+            ),
+          );
+
+          final XFile file = await camera.stopVideoRecording(0);
+
+          expect(file.path, outputPath);
+          expect(camera.recording, isNull);
+        },
+      );
+
+      test(
+        'stopVideoRecording skips a finalize of an earlier recording',
+        () async {
+          final camera = AndroidCameraCameraX();
+          setUpActiveRecording(camera);
+
+          AndroidCameraCameraX.videoRecordingEventStreamController
+            ..add(
+              VideoRecordEventFinalize.pigeon_detached(
+                error: 3,
+                outputUri: 'file:///data/cache/REC41.mp4',
+              ),
+            )
+            ..add(
+              VideoRecordEventFinalize.pigeon_detached(
+                error: 0,
+                outputUri: outputUri,
+              ),
+            );
+
+          final XFile file = await camera.stopVideoRecording(0);
+
+          expect(file.path, outputPath);
+        },
+      );
+
+      test(
+        'stopVideoRecording cleans up the recording when closing it fails',
+        () async {
+          final camera = AndroidCameraCameraX();
+          final MockRecording recording = setUpActiveRecording(camera);
+          when(
+            recording.close(),
+          ).thenThrow(PlatformException(code: 'channel-error'));
+
+          await expectLater(
+            camera.stopVideoRecording(0),
+            throwsA(isA<PlatformException>()),
+          );
+          expect(camera.recording, isNull);
+          expect(camera.pendingRecording, isNull);
+        },
+      );
     });
 
     test(
@@ -3543,7 +3811,7 @@ void main() {
 
         // Simulate video recording being finalized so stopVideoRecording completes.
         AndroidCameraCameraX.videoRecordingEventStreamController.add(
-          VideoRecordEventFinalize.pigeon_detached(),
+          VideoRecordEventFinalize.pigeon_detached(error: 0),
         );
 
         await camera.stopVideoRecording(90);

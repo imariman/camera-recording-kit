@@ -198,6 +198,50 @@ class AndroidCameraCameraX extends CameraPlatform {
   /// set for the camera in use.
   static const String zoomStateNotSetErrorCode = 'zoomStateNotSet';
 
+  /// Error code of the [CameraException]s thrown when a video recording fails
+  /// to start, stop or finalize.
+  static const String videoRecordingFailedErrorCode = 'videoRecordingFailed';
+
+  /// `VideoRecordEvent.Finalize` error codes after which CameraX still wrote a
+  /// complete, playable output file, so [stopVideoRecording] returns it.
+  ///
+  /// * `ERROR_NONE` (0).
+  /// * `ERROR_FILE_SIZE_LIMIT_REACHED` (2) and `ERROR_DURATION_LIMIT_REACHED`
+  ///   (9): the file holds everything recorded up to the limit. This plugin
+  ///   sets no such limit; they are listed for completeness.
+  /// * `ERROR_SOURCE_INACTIVE` (4): the camera stopped producing frames, for
+  ///   example because the activity lifecycle closed it when the app went to
+  ///   the background before [stopVideoRecording] ran. CameraX documents that
+  ///   the file holds the frames captured until then, so the recording is
+  ///   delivered instead of being lost.
+  ///
+  /// Any other code (for example `ERROR_INSUFFICIENT_STORAGE` or
+  /// `ERROR_NO_VALID_DATA`) makes [stopVideoRecording] throw.
+  ///
+  /// See https://developer.android.com/reference/androidx/camera/video/VideoRecordEvent.Finalize.
+  static const Set<int> finalizeErrorsWithUsableOutput = <int>{0, 2, 4, 9};
+
+  static const Map<int, String> _finalizeErrorNames = <int, String>{
+    0: 'ERROR_NONE',
+    1: 'ERROR_UNKNOWN',
+    2: 'ERROR_FILE_SIZE_LIMIT_REACHED',
+    3: 'ERROR_INSUFFICIENT_STORAGE',
+    4: 'ERROR_SOURCE_INACTIVE',
+    5: 'ERROR_INVALID_OUTPUT_OPTIONS',
+    6: 'ERROR_ENCODING_FAILED',
+    7: 'ERROR_RECORDER_ERROR',
+    8: 'ERROR_NO_VALID_DATA',
+    9: 'ERROR_DURATION_LIMIT_REACHED',
+    10: 'ERROR_RECORDING_GARBAGE_COLLECTED',
+  };
+
+  /// Describes a `VideoRecordEvent.Finalize` error code, including its CameraX
+  /// constant name when known, for example `error code 3
+  /// (ERROR_INSUFFICIENT_STORAGE)`.
+  @visibleForTesting
+  static String describeVideoRecordFinalizeError(int error) =>
+      'error code $error (${_finalizeErrorNames[error] ?? 'unknown'})';
+
   /// Whether or not the capture orientation is locked.
   ///
   /// Indicates a new target rotation should not be set as it has been locked by
@@ -1271,37 +1315,63 @@ class AndroidCameraCameraX extends CameraPlatform {
       onStreamedFrameAvailable(options.cameraId).listen(streamCallback);
     }
 
-    // Wait for video recording to start.
-    VideoRecordEvent event = await videoRecordingEventStreamQueue.next;
-    while (event is! VideoRecordEventStart) {
-      event = await videoRecordingEventStreamQueue.next;
+    // Wait for video recording to start. A Finalize of this recording before
+    // its Start means CameraX could not start it (for example the recorder is
+    // busy or the camera source is inactive) and no Start will follow.
+    while (true) {
+      final VideoRecordEvent event = await _nextVideoRecordEvent();
+      if (event is VideoRecordEventStart) {
+        return;
+      }
+      if (event is VideoRecordEventFinalize &&
+          _finalizesCurrentRecording(event)) {
+        recording = null;
+        pendingRecording = null;
+        videoOutputPath = null;
+        throw CameraException(
+          videoRecordingFailedErrorCode,
+          'The recording was finalized before it started '
+          '(${describeVideoRecordFinalizeError(event.error)}).',
+        );
+      }
     }
   }
 
   /// Stops the video recording and returns the file where it was saved.
-  /// Throws a CameraException if the recording is currently null, or if the
-  /// videoOutputPath is null.
+  /// Throws a CameraException if the recording is currently null, if the
+  /// videoOutputPath is null, or if CameraX finalized the recording with an
+  /// error that leaves no usable file (see
+  /// [finalizeErrorsWithUsableOutput]).
   ///
-  /// If the videoOutputPath is null the recording objects are cleaned up
-  /// so starting a new recording is possible.
+  /// In every error case after the recording was closed, the recording
+  /// objects are cleaned up so starting a new recording is possible.
   @override
   Future<XFile> stopVideoRecording(int cameraId) async {
     if (recording == null) {
       throw CameraException(
-        'videoRecordingFailed',
+        videoRecordingFailedErrorCode,
         'Attempting to stop a '
-            'video recording while no recording is in progress.',
+        'video recording while no recording is in progress.',
       );
     }
 
     /// Stop the active recording and wait for the video recording to be finalized.
-    await recording!.close();
-    VideoRecordEvent event = await videoRecordingEventStreamQueue.next;
-    while (event is! VideoRecordEventFinalize) {
-      event = await videoRecordingEventStreamQueue.next;
+    final VideoRecordEventFinalize finalizeEvent;
+    try {
+      await recording!.close();
+      finalizeEvent = await _nextFinalizeOfCurrentRecording();
+    } finally {
+      recording = null;
+      pendingRecording = null;
     }
-    recording = null;
-    pendingRecording = null;
+
+    if (!finalizeErrorsWithUsableOutput.contains(finalizeEvent.error)) {
+      throw CameraException(
+        videoRecordingFailedErrorCode,
+        'The recording was finalized with '
+        '${describeVideoRecordFinalizeError(finalizeEvent.error)}.',
+      );
+    }
 
     if (videoOutputPath == null) {
       // Handle any errors with finalizing video recording.
@@ -1319,6 +1389,52 @@ class AndroidCameraCameraX extends CameraPlatform {
       VideoRecordedEvent(cameraId, videoFile, /* duration */ null),
     );
     return videoFile;
+  }
+
+  /// Returns the next [VideoRecordEvent] reported by CameraX.
+  Future<VideoRecordEvent> _nextVideoRecordEvent() async {
+    try {
+      return await videoRecordingEventStreamQueue.next;
+    } on StateError {
+      // The queue was reset (see [dispose]) while this recording was waiting
+      // for an event, so no event for it will arrive.
+      throw CameraException(
+        videoRecordingFailedErrorCode,
+        'The camera was disposed before the recording reported its state.',
+      );
+    }
+  }
+
+  /// Waits for the [VideoRecordEventFinalize] of the current recording,
+  /// skipping every other event.
+  Future<VideoRecordEventFinalize> _nextFinalizeOfCurrentRecording() async {
+    while (true) {
+      final VideoRecordEvent event = await _nextVideoRecordEvent();
+      if (event is VideoRecordEventFinalize &&
+          _finalizesCurrentRecording(event)) {
+        return event;
+      }
+    }
+  }
+
+  /// Whether [event] finalizes the recording written to [videoOutputPath].
+  ///
+  /// A Finalize of an earlier recording (for example one closed while its
+  /// camera was disposed) can still arrive; it names a different output file.
+  /// The file names are compared because recording file names are unique and
+  /// CameraX may report a canonicalized directory. A Finalize without an output
+  /// URI cannot be attributed and is treated as the current one.
+  bool _finalizesCurrentRecording(VideoRecordEventFinalize event) {
+    final String? outputUri = event.outputUri;
+    final String? outputPath = videoOutputPath;
+    if (outputUri == null || outputPath == null) {
+      return true;
+    }
+    final Uri? uri = Uri.tryParse(outputUri);
+    if (uri == null || uri.pathSegments.isEmpty) {
+      return true;
+    }
+    return uri.pathSegments.last == outputPath.split('/').last;
   }
 
   /// Pause the current video recording of the camera with ID [cameraId] if it is not null.

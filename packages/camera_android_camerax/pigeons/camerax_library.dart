@@ -187,7 +187,21 @@ abstract class VideoRecordEventStart extends VideoRecordEvent {}
     fullClassName: 'androidx.camera.video.VideoRecordEvent.Finalize',
   ),
 )
-abstract class VideoRecordEventFinalize extends VideoRecordEvent {}
+abstract class VideoRecordEventFinalize extends VideoRecordEvent {
+  /// The error type of the finalized recording.
+  ///
+  /// One of the `VideoRecordEvent.Finalize.ERROR_*` constants, or
+  /// `ERROR_NONE` (0) when the recording finished without error.
+  ///
+  /// See https://developer.android.com/reference/androidx/camera/video/VideoRecordEvent.Finalize#getError().
+  late int error;
+
+  /// The URI of the recording output, or null if CameraX reported an empty
+  /// URI (for example when no output was written).
+  ///
+  /// See https://developer.android.com/reference/androidx/camera/video/OutputResults#getOutputUri().
+  late String? outputUri;
+}
 
 /// A MeteringPoint is used to specify a region which can then be converted to
 /// sensor coordinate system for focus and metering purpose.

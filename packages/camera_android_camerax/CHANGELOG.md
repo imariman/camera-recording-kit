@@ -3,6 +3,19 @@
 * Resets per-camera focus, exposure, flash/torch, capture-orientation lock and
   paused-preview state when a camera is created or disposed, so a setting made
   on a previous camera no longer makes the same call a no-op on the next one.
+* Reports the CameraX finalize error code and output URI with
+  `VideoRecordEventFinalize`. `stopVideoRecording` now throws a
+  `CameraException` (code `videoRecordingFailed`, message naming the CameraX
+  error code) when a recording is finalized with an error that leaves no usable
+  file, such as `ERROR_INSUFFICIENT_STORAGE` or `ERROR_NO_VALID_DATA`, instead
+  of returning it as a successful recording. A recording finalized with
+  `ERROR_SOURCE_INACTIVE` (camera closed, for example by the activity lifecycle
+  when the app goes to the background) or a size/duration limit is still
+  returned, because CameraX writes a playable file in those cases.
+* `startVideoCapturing` now throws and clears the recording when CameraX
+  finalizes it before it starts, instead of waiting forever for a start event.
+* Finalize events of an earlier recording (a different output file) are no
+  longer taken as the finalize of the current one.
 
 ## 0.7.4+3
 
