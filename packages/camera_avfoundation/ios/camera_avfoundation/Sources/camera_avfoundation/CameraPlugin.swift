@@ -21,6 +21,11 @@ public final class CameraPlugin: NSObject, FlutterPlugin {
   /// An internal camera object that manages camera's state and performs camera operations.
   var camera: Camera?
   private var activeCameraID: Int64?
+  /// Texture ID `camera` is registered under. Accessed on `captureSessionQueue`.
+  private var cameraTextureID: Int64?
+  /// Device orientation matching the interface orientation when the last camera was created.
+  /// Accessed on `captureSessionQueue`.
+  private var interfaceOrientationFallback: UIDeviceOrientation = .portrait
   private var recordingQualityChannel: FlutterMethodChannel?
   /// One-shot codec selection consumed by the next native create request.
   private var pendingRecordingVideoCodec: RecordingQuality.VideoCodec?
@@ -34,8 +39,7 @@ public final class CameraPlugin: NSObject, FlutterPlugin {
       permissionManager: CameraPermissionManager(
         permissionService: DefaultPermissionService()),
       deviceFactory: { name in
-        // TODO(RobertOdrowaz) Implement better error handling and remove non-null assertion
-        AVCaptureDevice(uniqueID: name)!
+        AVCaptureDevice(uniqueID: name)
       },
       captureSessionFactory: { AVCaptureSession() },
       captureDeviceInputFactory: DefaultCaptureDeviceInputFactory(),
@@ -111,7 +115,12 @@ public final class CameraPlugin: NSObject, FlutterPlugin {
       }
       captureSessionQueue.async {
         do {
-          self.replyToRecordingQuality(result, with: .success(try RecordingQuality.capabilities(cameraName: cameraName)))
+          let activeWriterCodecs = self.camera?.writerVideoCodecTypes(forCameraName: cameraName)
+          self.replyToRecordingQuality(
+            result,
+            with: .success(
+              try RecordingQuality.capabilities(
+                cameraName: cameraName, activeWriterCodecs: activeWriterCodecs)))
         } catch {
           self.replyToRecordingQuality(result, with: .failure(error))
         }
@@ -122,11 +131,11 @@ public final class CameraPlugin: NSObject, FlutterPlugin {
         return
       }
       captureSessionQueue.async {
-        guard self.hasActiveCamera(cameraID) else {
+        guard self.hasActiveCamera(cameraID), let camera = self.camera else {
           self.replyToRecordingQuality(result, with: .failure(RecordingQuality.qualityError("Camera ID is not active.")))
           return
         }
-        self.replyToRecordingQuality(result, with: .success(self.camera!.recordingQualityApplied()))
+        self.replyToRecordingQuality(result, with: .success(camera.recordingQualityApplied()))
       }
     case "setRecordingVideoCodec":
       guard let rawCodec = arguments?["codec"] as? String,
@@ -153,11 +162,12 @@ public final class CameraPlugin: NSObject, FlutterPlugin {
         return
       }
       captureSessionQueue.async {
-        guard self.hasActiveCamera(cameraID) else {
+        guard self.hasActiveCamera(cameraID), let camera = self.camera else {
           self.replyToRecordingQuality(result, with: .failure(RecordingQuality.qualityError("Camera ID is not active.")))
           return
         }
-        self.camera!.waitForRecordingFocus { didLock in
+        // The camera completes the wait even when it is closed meanwhile.
+        camera.waitForRecordingFocus { didLock in
           DispatchQueue.main.async { result(didLock) }
         }
       }
@@ -192,8 +202,43 @@ public final class CameraPlugin: NSObject, FlutterPlugin {
     }
   }
 
+  /// Error for a call that needs a camera after the plugin or the camera is gone.
+  private static let cameraUnavailableError = PigeonError(
+    code: "cameraNotFound", message: "No camera is available.", details: nil)
+
+  /// Runs `body` on `captureSessionQueue` with the current camera, or fails `completion` with
+  /// `cameraNotFound` when the plugin or the camera is gone instead of never replying.
+  private func withCamera<T>(
+    _ completion: @escaping (Result<T, any Error>) -> Void,
+    _ body: @escaping (CameraPlugin, Camera) -> Void
+  ) {
+    captureSessionQueue.async { [weak self] in
+      guard let self, let camera = self.camera else {
+        completion(.failure(CameraPlugin.cameraUnavailableError))
+        return
+      }
+      body(self, camera)
+    }
+  }
+
+  /// The device orientation matching the current interface orientation. Main thread only.
+  private static func currentInterfaceDeviceOrientation() -> UIDeviceOrientation {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+    guard let interfaceOrientation = scene?.interfaceOrientation else { return .portrait }
+    return CaptureMetering.deviceOrientation(for: interfaceOrientation)
+  }
+
   private static func pigeonErrorFromNSError(_ error: NSError) -> PigeonError {
-    if error.domain == "dev.teleprompter.recording_quality" && (2...4).contains(error.code) {
+    if error.domain == DefaultCamera.cameraErrorDomain
+      && error.code == DefaultCamera.cameraNotFoundErrorCode
+    {
+      return PigeonError(
+        code: "cameraNotFound",
+        message: error.localizedDescription,
+        details: error.domain)
+    }
+    if error.domain == "dev.teleprompter.recording_quality" && (2...5).contains(error.code) {
       return PigeonError(
         code: "unsupportedRecordingProfile",
         message: error.localizedDescription,
@@ -242,7 +287,10 @@ extension CameraPlugin: CameraApi {
     completion: @escaping (Result<[PlatformCameraDescription], any Error>) -> Void
   ) {
     captureSessionQueue.async { [weak self] in
-      guard let strongSelf = self else { return }
+      guard let strongSelf = self else {
+        completion(.failure(CameraPlugin.cameraUnavailableError))
+        return
+      }
 
       let discoveryDevices: [AVCaptureDevice.DeviceType] = [
         .builtInWideAngleCamera,
@@ -304,10 +352,20 @@ extension CameraPlugin: CameraApi {
     cameraName: String, settings: PlatformMediaSettings,
     completion: @escaping (Result<Int64, any Error>) -> Void
   ) {
+    // `create` is called on the main thread, where the interface orientation can be read.
+    let interfaceOrientation = CameraPlugin.currentInterfaceDeviceOrientation()
     // Create FLTCam only if granted camera access (and audio access if audio is enabled)
     captureSessionQueue.async { [weak self] in
-      self?.permissionManager.requestCameraPermission { error in
-        guard let strongSelf = self else { return }
+      guard let strongSelf = self else {
+        completion(.failure(CameraPlugin.cameraUnavailableError))
+        return
+      }
+      strongSelf.interfaceOrientationFallback = interfaceOrientation
+      strongSelf.permissionManager.requestCameraPermission { error in
+        guard let strongSelf = self else {
+          completion(.failure(CameraPlugin.cameraUnavailableError))
+          return
+        }
 
         if let error = error {
           completion(.failure(error))
@@ -321,7 +379,10 @@ extension CameraPlugin: CameraApi {
           // Setup audio capture session only if granted audio access.
           strongSelf.permissionManager.requestAudioPermission { [weak self] audioError in
             // cannot use the outter `strongSelf`
-            guard let strongSelf = self else { return }
+            guard let strongSelf = self else {
+              completion(.failure(CameraPlugin.cameraUnavailableError))
+              return
+            }
 
             if let audioError = audioError {
               completion(.failure(audioError))
@@ -349,7 +410,11 @@ extension CameraPlugin: CameraApi {
     completion: @escaping (Result<Int64, any Error>) -> Void
   ) {
     captureSessionQueue.async { [weak self] in
-      self?.sessionQueueCreateCamera(name: withName, settings: settings, completion: completion)
+      guard let self else {
+        completion(.failure(CameraPlugin.cameraUnavailableError))
+        return
+      }
+      self.sessionQueueCreateCamera(name: withName, settings: settings, completion: completion)
     }
   }
 
@@ -368,24 +433,41 @@ extension CameraPlugin: CameraApi {
       mediaSettings: settings,
       mediaSettingsWrapper: mediaSettingsAVWrapper,
       captureDeviceFactory: captureDeviceFactory,
-      audioCaptureDeviceFactory: { AVCaptureDevice.default(for: .audio)! },
+      audioCaptureDeviceFactory: { AVCaptureDevice.default(for: .audio) },
       captureSessionFactory: captureSessionFactory,
       captureSessionQueue: captureSessionQueue,
       captureDeviceInputFactory: captureDeviceInputFactory,
       initialCameraName: name,
       recordingVideoCodec: recordingVideoCodec
     )
+    camConfiguration.fallbackOrientation = interfaceOrientationFallback
 
     do {
       let newCamera = try DefaultCamera(configuration: camConfiguration)
 
+      // The previous camera is replaced: close it (finalizing a running recording) and drop its
+      // texture so a later `dispose` of its ID cannot close the new camera.
+      let oldTextureID = cameraTextureID
       camera?.close()
       camera = newCamera
       activeCameraID = nil
+      cameraTextureID = nil
 
       ensureToRunOnMainQueue { [weak self] in
-        guard let strongSelf = self else { return }
-        completion(.success(strongSelf.registry.register(newCamera)))
+        guard let strongSelf = self else {
+          completion(.failure(CameraPlugin.cameraUnavailableError))
+          return
+        }
+        if let oldTextureID {
+          strongSelf.registry.unregisterTexture(oldTextureID)
+        }
+        let textureID = strongSelf.registry.register(newCamera)
+        strongSelf.captureSessionQueue.async {
+          if strongSelf.camera === newCamera {
+            strongSelf.cameraTextureID = textureID
+          }
+          completion(.success(textureID))
+        }
       }
     } catch let error as NSError {
       completion(.failure(CameraPlugin.pigeonErrorFromNSError(error)))
@@ -445,12 +527,8 @@ extension CameraPlugin: CameraApi {
   }
 
   func startImageStream(completion: @escaping (Result<Void, any Error>) -> Void) {
-    captureSessionQueue.async { [weak self] in
-      guard let strongSelf = self else {
-        completion(.success(()))
-        return
-      }
-      strongSelf.camera?.startImageStream(with: strongSelf.messenger, completion: completion)
+    withCamera(completion) { plugin, camera in
+      camera.startImageStream(with: plugin.messenger, completion: completion)
     }
   }
 
@@ -471,12 +549,21 @@ extension CameraPlugin: CameraApi {
   func dispose(cameraId: Int64, completion: @escaping (Result<Void, any Error>) -> Void) {
     registry.unregisterTexture(Int64(cameraId))
     captureSessionQueue.async { [weak self] in
-      if let strongSelf = self {
-        strongSelf.camera?.close()
-        strongSelf.camera = nil
-        strongSelf.activeCameraID = nil
+      // Only close the camera registered under `cameraId`; an older ID whose camera was already
+      // replaced by `create` must not close the current camera.
+      guard let strongSelf = self, let camera = strongSelf.camera,
+        strongSelf.cameraTextureID == cameraId || strongSelf.activeCameraID == cameraId
+      else {
+        completion(.success(()))
+        return
       }
-      completion(.success(()))
+      strongSelf.camera = nil
+      strongSelf.activeCameraID = nil
+      strongSelf.cameraTextureID = nil
+      // Reply once a running recording has been finalized, like the macOS backend.
+      camera.close {
+        completion(.success(()))
+      }
     }
   }
 
@@ -497,8 +584,8 @@ extension CameraPlugin: CameraApi {
   }
 
   func takePicture(completion: @escaping (Result<String, any Error>) -> Void) {
-    captureSessionQueue.async { [weak self] in
-      self?.camera?.captureToFile(completion: completion)
+    withCamera(completion) { _, camera in
+      camera.captureToFile(completion: completion)
     }
   }
 
@@ -512,17 +599,16 @@ extension CameraPlugin: CameraApi {
   func startVideoRecording(
     enableStream: Bool, completion: @escaping (Result<Void, any Error>) -> Void
   ) {
-    captureSessionQueue.async { [weak self] in
-      guard let strongSelf = self else { return }
-      strongSelf.camera?.startVideoRecording(
+    withCamera(completion) { plugin, camera in
+      camera.startVideoRecording(
         completion: completion,
-        messengerForStreaming: enableStream ? strongSelf.messenger : nil)
+        messengerForStreaming: enableStream ? plugin.messenger : nil)
     }
   }
 
   func stopVideoRecording(completion: @escaping (Result<String, any Error>) -> Void) {
-    captureSessionQueue.async { [weak self] in
-      self?.camera?.stopVideoRecording(completion: completion)
+    withCamera(completion) { _, camera in
+      camera.stopVideoRecording(completion: completion)
     }
   }
 
@@ -543,8 +629,8 @@ extension CameraPlugin: CameraApi {
   func setFlashMode(
     mode: PlatformFlashMode, completion: @escaping (Result<Void, any Error>) -> Void
   ) {
-    captureSessionQueue.async { [weak self] in
-      self?.camera?.setFlashMode(mode, withCompletion: completion)
+    withCamera(completion) { _, camera in
+      camera.setFlashMode(mode, withCompletion: completion)
     }
   }
 
@@ -552,16 +638,19 @@ extension CameraPlugin: CameraApi {
     mode: PlatformExposureMode, completion: @escaping (Result<Void, any Error>) -> Void
   ) {
     captureSessionQueue.async { [weak self] in
-      self?.camera?.setExposureMode(mode)
-      completion(.success(()))
+      guard let camera = self?.camera else {
+        completion(.success(()))
+        return
+      }
+      camera.setExposureMode(mode, withCompletion: completion)
     }
   }
 
   func setExposurePoint(
     point: PlatformPoint?, completion: @escaping (Result<Void, any Error>) -> Void
   ) {
-    captureSessionQueue.async { [weak self] in
-      self?.camera?.setExposurePoint(point, withCompletion: completion)
+    withCamera(completion) { _, camera in
+      camera.setExposurePoint(point, withCompletion: completion)
     }
   }
 
@@ -587,8 +676,11 @@ extension CameraPlugin: CameraApi {
 
   func setExposureOffset(offset: Double, completion: @escaping (Result<Void, any Error>) -> Void) {
     captureSessionQueue.async { [weak self] in
-      self?.camera?.setExposureOffset(offset)
-      completion(.success(()))
+      guard let camera = self?.camera else {
+        completion(.success(()))
+        return
+      }
+      camera.setExposureOffset(offset, withCompletion: completion)
     }
   }
 
@@ -596,15 +688,18 @@ extension CameraPlugin: CameraApi {
     mode: PlatformFocusMode, completion: @escaping (Result<Void, any Error>) -> Void
   ) {
     captureSessionQueue.async { [weak self] in
-      self?.camera?.setFocusMode(mode)
-      completion(.success(()))
+      guard let camera = self?.camera else {
+        completion(.success(()))
+        return
+      }
+      camera.setFocusMode(mode, withCompletion: completion)
     }
   }
 
   func setFocusPoint(point: PlatformPoint?, completion: @escaping (Result<Void, any Error>) -> Void)
   {
-    captureSessionQueue.async { [weak self] in
-      self?.camera?.setFocusPoint(point, completion: completion)
+    withCamera(completion) { _, camera in
+      camera.setFocusPoint(point, completion: completion)
     }
   }
 
@@ -629,16 +724,16 @@ extension CameraPlugin: CameraApi {
   }
 
   func setZoomLevel(zoom: Double, completion: @escaping (Result<Void, any Error>) -> Void) {
-    captureSessionQueue.async { [weak self] in
-      self?.camera?.setZoomLevel(zoom, withCompletion: completion)
+    withCamera(completion) { _, camera in
+      camera.setZoomLevel(zoom, withCompletion: completion)
     }
   }
 
   func setVideoStabilizationMode(
     mode: PlatformVideoStabilizationMode, completion: @escaping (Result<Void, any Error>) -> Void
   ) {
-    captureSessionQueue.async { [weak self] in
-      self?.camera?.setVideoStabilizationMode(mode, withCompletion: completion)
+    withCamera(completion) { _, camera in
+      camera.setVideoStabilizationMode(mode, withCompletion: completion)
     }
   }
 
@@ -673,8 +768,8 @@ extension CameraPlugin: CameraApi {
   func updateDescriptionWhileRecording(
     cameraName: String, completion: @escaping (Result<Void, any Error>) -> Void
   ) {
-    captureSessionQueue.async { [weak self] in
-      self?.camera?.setDescriptionWhileRecording(cameraName, withCompletion: completion)
+    withCamera(completion) { _, camera in
+      camera.setDescriptionWhileRecording(cameraName, withCompletion: completion)
     }
   }
 

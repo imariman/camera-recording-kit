@@ -6,11 +6,13 @@ import AVFoundation
 import CoreMedia
 import UIKit
 
-/// Factory block returning an FLTCaptureDevice.
+/// Factory block returning the capture device with the given unique ID, or nil when no such
+/// device exists (for example a stale camera name).
 /// Used in tests to inject a video capture device into DefaultCamera.
-typealias VideoCaptureDeviceFactory = (_ cameraName: String) -> CaptureDevice
+typealias VideoCaptureDeviceFactory = (_ cameraName: String) -> CaptureDevice?
 
-typealias AudioCaptureDeviceFactory = () -> CaptureDevice
+/// Factory block returning the default audio capture device, or nil when there is none.
+typealias AudioCaptureDeviceFactory = () -> CaptureDevice?
 
 typealias CaptureSessionFactory = () -> CaptureSession
 
@@ -38,6 +40,9 @@ class CameraConfiguration {
   let initialCameraName: String
   let recordingVideoCodec: RecordingQuality.VideoCodec
   var orientation: UIDeviceOrientation
+  /// Orientation to assume while the device lies flat or reports `.unknown`, normally derived
+  /// from the interface orientation when the camera was created.
+  var fallbackOrientation: UIDeviceOrientation = .portrait
 
   init(
     mediaSettings: PlatformMediaSettings,

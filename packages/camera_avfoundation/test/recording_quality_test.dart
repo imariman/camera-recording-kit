@@ -74,16 +74,69 @@ void main() {
   test(
     'setRecordingVideoCodec passes an HEVC request before camera creation',
     () async {
+      final calls = <MethodCall>[];
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, (MethodCall call) async {
-            expect(call.method, 'setRecordingVideoCodec');
-            expect(call.arguments, <String, dynamic>{'codec': 'hevc'});
+            calls.add(call);
             return null;
           });
 
       await setRecordingVideoCodec('hevc');
+
+      expect(calls, hasLength(1));
+      expect(calls.single.method, 'setRecordingVideoCodec');
+      expect(calls.single.arguments, <String, dynamic>{'codec': 'hevc'});
     },
   );
+
+  group('map results', () {
+    for (final entry in <String, Future<Map<String, dynamic>> Function()>{
+      'recordingQualityCapabilities': () =>
+          recordingQualityCapabilities('back-camera'),
+      'recordingQualityApplied': () => recordingQualityApplied(42),
+      'inspectRecordingMedia': () => inspectRecordingMedia('/tmp/video.mp4'),
+    }.entries) {
+      test('${entry.key} throws when the platform returns null', () async {
+        final methods = <String>[];
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(channel, (MethodCall call) async {
+              methods.add(call.method);
+              return null;
+            });
+
+        await expectLater(
+          entry.value(),
+          throwsA(
+            isA<PlatformException>()
+                .having(
+                  (PlatformException e) => e.code,
+                  'code',
+                  'recording_quality_empty_result',
+                )
+                .having(
+                  (PlatformException e) => e.message,
+                  'message',
+                  contains(entry.key),
+                ),
+          ),
+        );
+        expect(methods, <String>[entry.key]);
+      });
+    }
+  });
+
+  test('inspectRecordingMedia passes the path and returns the map', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall call) async {
+          expect(call.method, 'inspectRecordingMedia');
+          expect(call.arguments, <String, dynamic>{'path': '/tmp/video.mp4'});
+          return <String, dynamic>{'width': 1920, 'codec': 'hevc'};
+        });
+
+    final metadata = await inspectRecordingMedia('/tmp/video.mp4');
+
+    expect(metadata, <String, dynamic>{'width': 1920, 'codec': 'hevc'});
+  });
 
   test('waitForRecordingFocus returns false for an unsupported lens', () async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
@@ -94,5 +147,25 @@ void main() {
         });
 
     expect(await waitForRecordingFocus(7), isFalse);
+  });
+
+  test('waitForRecordingFocus returns true when focus converged', () async {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall call) async => true);
+
+    expect(await waitForRecordingFocus(7), isTrue);
+  });
+
+  test('waitForRecordingFocus treats a null result as false', () async {
+    var called = false;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (MethodCall call) async {
+          called = true;
+          expect(call.method, 'waitForRecordingFocus');
+          return null;
+        });
+
+    expect(await waitForRecordingFocus(7), isFalse);
+    expect(called, isTrue);
   });
 }

@@ -9,6 +9,33 @@ import AVFoundation
 typealias VideoDimensionsConverter = (CaptureDeviceFormat) -> CMVideoDimensions
 
 enum FormatUtils {
+  /// Pixel format subtypes the Flutter engine cannot render. `btp2`
+  /// (kCVPixelFormatType_96VersatileBayerPacked12) is compressed, lossy and crashes the engine.
+  static let unsupportedSubTypes: [FourCharCode] = [
+    1_651_798_066  // 'btp2'
+  ]
+
+  /// Whether a device format may be selected or advertised: not an engine-incompatible subtype
+  /// and not a 1:1 resolution (such as the iPhone 17 centre stage sensor formats).
+  static func isSelectable(
+    _ format: CaptureDeviceFormat,
+    videoDimensionsConverter: VideoDimensionsConverter
+  ) -> Bool {
+    let subType = CMFormatDescriptionGetMediaSubType(format.formatDescription)
+    if unsupportedSubTypes.contains(subType) {
+      return false
+    }
+    let dimensions = videoDimensionsConverter(format)
+    return dimensions.width != dimensions.height
+  }
+
+  /// Whether `format` can sustain `frameRate`.
+  static func supports(frameRate: Double, on format: CaptureDeviceFormat) -> Bool {
+    return format.flutterVideoSupportedFrameRateRanges.contains {
+      Double($0.minFrameRate) <= frameRate && frameRate <= Double($0.maxFrameRate)
+    }
+  }
+
   /// Finds a format that exactly matches [targetResolution] and can sustain
   /// [targetFrameRate]. Unlike `findBestFormat`, this never substitutes a
   /// nearby frame rate: callers use it for an explicit recording profile.
@@ -21,24 +48,16 @@ enum FormatUtils {
     let preferredSubType = CMFormatDescriptionGetMediaSubType(
       captureDevice.flutterActiveFormat.formatDescription)
 
-    return captureDevice.flutterFormats.first { format in
+    let candidates = captureDevice.flutterFormats.filter { format in
       let dimensions = videoDimensionsConverter(format)
-      let matchesResolution = dimensions.width == targetResolution.width
-        && dimensions.height == targetResolution.height
-      let supportsFrameRate = format.flutterVideoSupportedFrameRateRanges.contains {
-        Double($0.minFrameRate) <= targetFrameRate && targetFrameRate <= Double($0.maxFrameRate)
-      }
-      return matchesResolution && supportsFrameRate
-        && CMFormatDescriptionGetMediaSubType(format.formatDescription) == preferredSubType
-    } ?? captureDevice.flutterFormats.first { format in
-      let dimensions = videoDimensionsConverter(format)
-      let supportsFrameRate = format.flutterVideoSupportedFrameRateRanges.contains {
-        Double($0.minFrameRate) <= targetFrameRate && targetFrameRate <= Double($0.maxFrameRate)
-      }
       return dimensions.width == targetResolution.width
         && dimensions.height == targetResolution.height
-        && supportsFrameRate
+        && supports(frameRate: targetFrameRate, on: format)
+        && isSelectable(format, videoDimensionsConverter: videoDimensionsConverter)
     }
+    return candidates.first {
+      CMFormatDescriptionGetMediaSubType($0.formatDescription) == preferredSubType
+    } ?? candidates.first
   }
 
   /// Returns frame rate supported by format closest to targetFrameRate.

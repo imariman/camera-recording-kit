@@ -36,13 +36,16 @@ Releasing or disposing `CameraService` during a recording (for example when the
 app enters background) finalizes the recording instead of dropping it. `release()`
 and `dispose()` return the finalized file with the configured capture context but
 without inspection, so the caller that already awaits them can offer
-Save/Discard; the service never deletes it. If a macOS session is disposed
-directly while recording, the backend finalizes the file before replying to
-Dart, keeps it on disk and logs its path rather than dropping it. On app
-termination the macOS backend waits up to five seconds for that finalize
-without relying on the main run loop. macOS recordings are fragmented MP4, so
-a file whose finalize is cut short (a kill, a crash, a writer failure) stays
-readable up to its last one-second fragment.
+Save/Discard; the service never deletes it. On iOS, where a writer still
+writing when the app is suspended fails, the backend holds a background task
+from `willResignActive` and finalizes a running recording itself once the app
+is in the background; the next stop (and so `release()`) returns that file.
+If a macOS or iOS session is disposed directly while recording, the backend
+finalizes the file before replying to Dart, keeps it on disk and logs its path
+rather than dropping it. On app termination the macOS backend waits up to five
+seconds for that finalize without relying on the main run loop. macOS
+recordings are fragmented MP4, so a file whose finalize is cut short (a kill, a
+crash, a writer failure) stays readable up to its last one-second fragment.
 
 Focus and exposure default to continuous automatic behavior. A lock is applied
 only after convergence and only if both focus and exposure accept it; otherwise

@@ -28,6 +28,13 @@ let package = Package(
       resources: [
         .process("Resources")
       ]
-    )
+    ),
+    // Device-free unit tests of pure logic (format selection, capability building, metering
+    // and orientation decisions). Run with `python3 tool/test_ios_camera_native.py`.
+    .testTarget(
+      name: "camera_avfoundationTests",
+      dependencies: ["camera_avfoundation"],
+      path: "Tests/camera_avfoundationTests"
+    ),
   ]
 )
