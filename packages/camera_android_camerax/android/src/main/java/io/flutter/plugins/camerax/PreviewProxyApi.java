@@ -19,6 +19,7 @@ import androidx.camera.core.resolutionselector.ResolutionSelector;
 import io.flutter.view.TextureRegistry;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
@@ -145,10 +146,14 @@ class PreviewProxyApi extends PigeonApiPreview {
       surfaceProducer.setSize(
           request.getResolution().getWidth(), request.getResolution().getHeight());
       Surface flutterSurface = surfaceProducer.getForcedNewSurface();
+      // One executor per request delivers its single result; shut it down once the result is
+      // handled so preview rebinds do not leak threads.
+      final ExecutorService resultExecutor = Executors.newSingleThreadExecutor();
       request.provideSurface(
           flutterSurface,
-          Executors.newSingleThreadExecutor(),
+          resultExecutor,
           (result) -> {
+            resultExecutor.shutdown();
             // See
             // https://developer.android.com/reference/androidx/camera/core/SurfaceRequest.Result
             // for documentation.

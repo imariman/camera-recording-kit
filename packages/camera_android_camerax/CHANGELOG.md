@@ -47,6 +47,9 @@
   `unsupportedRecordingProfile`. Other `IllegalArgumentException`s, such as a
   missing (unplugged) camera, stay generic errors instead of making callers try
   every lower profile.
+* Shuts down the single-thread executor created for each preview surface request
+  and each `takePicture` once its result was delivered, so repeated preview
+  rebinds and captures no longer leak threads.
 
 ## 0.7.4+3
 
