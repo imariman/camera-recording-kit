@@ -107,10 +107,17 @@ class AndroidCameraCameraX extends CameraPlatform {
   deviceOrientationChangedStreamController =
       StreamController<DeviceOrientationChangedEvent>.broadcast();
 
-  /// Stream queue to pick up finalized viceo recording events in
-  /// [stopVideoRecording].
-  final StreamQueue<VideoRecordEvent> videoRecordingEventStreamQueue =
+  /// Stream queue to pick up video recording events in [startVideoCapturing]
+  /// and [stopVideoRecording].
+  ///
+  /// Replaced by [dispose] so events of an abandoned recording do not reach the
+  /// next camera.
+  @visibleForTesting
+  StreamQueue<VideoRecordEvent> videoRecordingEventStreamQueue =
       StreamQueue<VideoRecordEvent>(videoRecordingEventStreamController.stream);
+
+  /// How long [dispose] waits for the Finalize of a recording it closes.
+  static const Duration _disposeFinalizeTimeout = Duration(seconds: 2);
 
   late final VideoRecordEventListener _videoRecordingEventListener =
       VideoRecordEventListener(
@@ -462,7 +469,16 @@ class AndroidCameraCameraX extends CameraPlatform {
 
     // Retrieve a fresh ProcessCameraProvider instance.
     processCameraProvider ??= await ProcessCameraProvider.getInstance();
-    unawaited(processCameraProvider!.unbindAll());
+    // Not awaited to keep camera creation fast; platform calls are handled in
+    // order, so the binds below still run after it. Report a failure instead
+    // of dropping it as an unhandled async error.
+    unawaited(
+      processCameraProvider!.unbindAll().catchError((Object error) {
+        cameraErrorStreamController.add(
+          'Unbinding the previous camera use cases failed: $error',
+        );
+      }),
+    );
 
     // Configure Preview instance.
     preview = Preview(
@@ -583,11 +599,49 @@ class AndroidCameraCameraX extends CameraPlatform {
   @override
   Future<void> dispose(int cameraId) async {
     _resetPerCameraState();
+    await _abandonActiveRecording();
     await preview?.releaseSurfaceProvider();
     await liveCameraState?.removeObservers();
     await processCameraProvider?.unbindAll();
     await imageAnalysis?.clearAnalyzer();
     await deviceOrientationManager.stopListeningForDeviceOrientationChange();
+  }
+
+  /// Best-effort cleanup of a recording that is still active when the camera
+  /// is disposed, for example because [stopVideoRecording] failed and the
+  /// caller went on to dispose.
+  ///
+  /// Closes the recording, waits briefly for its Finalize so it cannot be
+  /// mistaken for an event of the next recording, clears the recording state
+  /// so the next camera's [startVideoCapturing] does not silently no-op, and
+  /// replaces [videoRecordingEventStreamQueue] to drop every queued event. A
+  /// caller still waiting on the old queue gets a [CameraException].
+  Future<void> _abandonActiveRecording() async {
+    final Recording? activeRecording = recording;
+    if (activeRecording != null) {
+      try {
+        await activeRecording.close();
+        await _nextFinalizeOfCurrentRecording().timeout(
+          _disposeFinalizeTimeout,
+        );
+      } on TimeoutException {
+        // Finalize did not arrive in time; the queue reset below drops it.
+      } on Exception catch (e) {
+        cameraErrorStreamController.add(
+          'Closing the active recording while disposing the camera failed: $e',
+        );
+      }
+    }
+    recording = null;
+    pendingRecording = null;
+    videoOutputPath = null;
+
+    final StreamQueue<VideoRecordEvent> previousQueue =
+        videoRecordingEventStreamQueue;
+    videoRecordingEventStreamQueue = StreamQueue<VideoRecordEvent>(
+      videoRecordingEventStreamController.stream,
+    );
+    unawaited(previousQueue.cancel(immediate: true));
   }
 
   /// Resets the focus, exposure, flash/torch, orientation-lock and preview
@@ -1071,11 +1125,13 @@ class AndroidCameraCameraX extends CameraPlatform {
     }
     final CameraInfo? chosenCameraInfo = _savedCameras[description.name];
 
-    // Save CameraSelector that matches cameraDescription.
+    // Keep the new lens in locals until the bind succeeds, so a failed switch
+    // leaves the selector, facing and orientation of the bound camera intact.
     final LensFacing cameraSelectorLensDirection =
         _getCameraSelectorLensDirection(description.lensDirection);
-    cameraIsFrontFacing = cameraSelectorLensDirection == LensFacing.front;
-    cameraSelector = CameraSelector(cameraInfoForFilter: chosenCameraInfo);
+    final CameraSelector newCameraSelector = CameraSelector(
+      cameraInfoForFilter: chosenCameraInfo,
+    );
 
     // Unbind all use cases and rebind to new CameraSelector
     final useCases = <UseCase>[videoCapture!];
@@ -1090,16 +1146,44 @@ class AndroidCameraCameraX extends CameraPlatform {
         await processCameraProvider!.isBound(imageAnalysis!)) {
       useCases.add(imageAnalysis!);
     }
-    await processCameraProvider?.unbindAll();
-    camera = await processCameraProvider?.bindToLifecycle(
-      cameraSelector!,
-      useCases,
-    );
+    await processCameraProvider!.unbindAll();
+    final Camera newCamera;
+    try {
+      newCamera = await processCameraProvider!.bindToLifecycle(
+        newCameraSelector,
+        useCases,
+      );
+    } catch (_) {
+      // The new lens rejected the use cases (for example it does not support
+      // the recording profile). Rebind the previous lens so the camera is not
+      // left unbound, then report the original failure.
+      await _rebindAfterFailedSwitch(useCases);
+      rethrow;
+    }
 
+    camera = newCamera;
+    cameraSelector = newCameraSelector;
+    cameraIsFrontFacing = cameraSelectorLensDirection == LensFacing.front;
     // Retrieve info required for correcting the rotation of the camera preview
     sensorOrientationDegrees = description.sensorOrientation.toDouble();
 
     await _updateCameraInfoAndLiveCameraState(_flutterSurfaceTextureId);
+  }
+
+  /// Binds [useCases] to the current [cameraSelector] again after a camera
+  /// switch failed to bind them to the new one.
+  Future<void> _rebindAfterFailedSwitch(List<UseCase> useCases) async {
+    try {
+      camera = await processCameraProvider!.bindToLifecycle(
+        cameraSelector!,
+        useCases,
+      );
+      await _updateCameraInfoAndLiveCameraState(_flutterSurfaceTextureId);
+    } on Exception catch (e) {
+      cameraErrorStreamController.add(
+        'Restoring the previous camera after a failed camera switch failed: $e',
+      );
+    }
   }
 
   /// Resume the paused preview for the camera with ID [cameraId].
@@ -1283,13 +1367,13 @@ class AndroidCameraCameraX extends CameraPlatform {
 
     await _bindUseCaseToLifecycle(videoCapture!, options.cameraId);
 
-    // Set target rotation to default CameraX rotation only if capture
-    // orientation not locked.
-    if (!captureOrientationLocked && shouldSetDefaultRotation) {
-      await videoCapture!.setTargetRotation(
-        await deviceOrientationManager.getDefaultDisplayRotation(),
-      );
-    }
+    // VideoCapture is bound at initialize and stays bound between recordings,
+    // so its target rotation must be refreshed for every recording: the locked
+    // capture orientation if any, otherwise the current display rotation.
+    await videoCapture!.setTargetRotation(
+      _lockedCaptureOrientation ??
+          await deviceOrientationManager.getDefaultDisplayRotation(),
+    );
 
     videoOutputPath = await systemServicesManager.getTempFilePath(
       videoPrefix,

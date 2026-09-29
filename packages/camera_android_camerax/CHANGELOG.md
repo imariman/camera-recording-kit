@@ -23,6 +23,21 @@
   `ProcessCameraProvider.unbind` now keeps the recording-quality registration in
   sync. Needs verification on a physical device with two consecutive
   recordings.
+* `dispose` now closes a recording that is still active (for example after a
+  failed stop), clears the recording state and drops queued recording events,
+  so the next camera's `startVideoCapturing` no longer silently no-ops and a
+  later stop cannot return the previous recording's file. A stop still waiting
+  for its finalize event when the camera is disposed now fails instead of
+  waiting forever.
+* `setDescriptionWhileRecording` is atomic: if the new lens cannot bind the use
+  cases, the previous lens is bound again and the camera selector, facing and
+  sensor orientation stay unchanged before the error is rethrown.
+* `startVideoCapturing` sets the `VideoCapture` target rotation on every
+  recording (the locked capture orientation, otherwise the current display
+  rotation). The rotation was previously frozen at bind time, so a device
+  rotated after initialization recorded with the wrong rotation hint.
+* A failure of the `unbindAll` issued while creating a camera is reported on the
+  camera error stream instead of being dropped.
 
 ## 0.7.4+3
 
