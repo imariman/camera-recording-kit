@@ -14,6 +14,19 @@
   reports it (VideoToolbox encoder check before camera permission is granted).
 * `recordingQualityApplied` derives `codec` from the writer settings instead
   of echoing the request, and reports `unknown` when no codec can be resolved.
+* Holds a `UIApplication` background task while recording from
+  `willResignActive` and finalizes a running recording once the app enters the
+  background (where `AVAssetWriter` would fail it). The next
+  `stopVideoRecording` returns that file.
+* `dispose` (and replacing the camera through `create`) finalizes a running
+  recording before replying instead of leaving the writer running; the file is
+  kept on disk and its path logged. A writer that cannot be finalized is
+  cancelled and its temporary file removed.
+* `stopVideoRecording` failures include the `AVAssetWriter` error, remove the
+  unplayable temporary file, and a recording stopped before its first frame
+  fails with a clear message instead of finalizing an empty writer.
+* `startVideoRecording` fails while the previous recording is still being
+  finalized.
 
 ## 0.10.2
 

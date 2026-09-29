@@ -476,12 +476,16 @@ extension CameraPlugin: CameraApi {
   func dispose(cameraId: Int64, completion: @escaping (Result<Void, any Error>) -> Void) {
     registry.unregisterTexture(Int64(cameraId))
     captureSessionQueue.async { [weak self] in
-      if let strongSelf = self {
-        strongSelf.camera?.close()
-        strongSelf.camera = nil
-        strongSelf.activeCameraID = nil
+      guard let strongSelf = self, let camera = strongSelf.camera else {
+        completion(.success(()))
+        return
       }
-      completion(.success(()))
+      strongSelf.camera = nil
+      strongSelf.activeCameraID = nil
+      // Reply once a running recording has been finalized, like the macOS backend.
+      camera.close {
+        completion(.success(()))
+      }
     }
   }
 

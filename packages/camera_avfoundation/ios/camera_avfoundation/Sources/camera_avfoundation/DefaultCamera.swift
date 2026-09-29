@@ -97,6 +97,15 @@ final class DefaultCamera: NSObject, Camera {
 
   private var videoRecordingPath: String?
   private(set) var isRecording = false
+  /// True while `finishWriting` runs for the last recording. Accessed on `captureSessionQueue`.
+  private var isFinishingWriting = false
+  /// Receivers of the outcome of the writer that is finishing. Accessed on `captureSessionQueue`.
+  private var finishWritingWaiters: [(Result<String, any Error>) -> Void] = []
+  /// Outcome of a recording finalized because the app went to the background, kept until the
+  /// next `stopVideoRecording`. Accessed on `captureSessionQueue`.
+  private var backgroundFinalizedRecording: Result<String, any Error>?
+  /// Keeps the app alive while a recording is finalized in the background.
+  private let backgroundTask = RecordingBackgroundTask()
   private var isRecordingPaused = false
   private var isFirstVideoSample = false
   private var isAudioSetup = false
@@ -272,10 +281,82 @@ final class DefaultCamera: NSObject, Camera {
         name: AVCaptureSession.runtimeErrorNotification,
         object: session)
     }
+
+    // A writer that is still writing when the app is suspended fails, so a background task is
+    // held from `willResignActive` and a running recording is finalized once the app is in the
+    // background. https://github.com/imariman/camera-recording-kit/issues/30
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(applicationWillResignActive),
+      name: UIApplication.willResignActiveNotification,
+      object: nil)
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(applicationDidEnterBackground),
+      name: UIApplication.didEnterBackgroundNotification,
+      object: nil)
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(applicationDidBecomeActive),
+      name: UIApplication.didBecomeActiveNotification,
+      object: nil)
   }
 
   @objc private func captureSessionWasInterrupted(notification: NSNotification) {
-    isRecordingDisconnected = true
+    let reason = (notification.userInfo?[AVCaptureSessionInterruptionReasonKey] as? NSNumber)
+      .flatMap { AVCaptureSession.InterruptionReason(rawValue: $0.intValue) }
+    let isBackgroundInterruption = reason == .videoDeviceNotAvailableInBackground
+    if isBackgroundInterruption {
+      backgroundTask.begin()
+    }
+    // Notifications arrive on an arbitrary thread; recording state lives on the session queue.
+    captureSessionQueue.async { [weak self] in
+      guard let self else { return }
+      self.isRecordingDisconnected = true
+      if isBackgroundInterruption {
+        self.finalizeRecordingForBackground()
+      }
+    }
+  }
+
+  @objc private func applicationWillResignActive(notification: NSNotification) {
+    // Begin on the main thread right away; it is dropped again when nothing is recording.
+    backgroundTask.begin()
+    captureSessionQueue.async { [weak self] in
+      self?.endBackgroundTaskIfIdle()
+    }
+  }
+
+  @objc private func applicationDidEnterBackground(notification: NSNotification) {
+    captureSessionQueue.async { [weak self] in
+      self?.finalizeRecordingForBackground()
+    }
+  }
+
+  @objc private func applicationDidBecomeActive(notification: NSNotification) {
+    captureSessionQueue.async { [weak self] in
+      guard let self, !self.isFinishingWriting else { return }
+      self.backgroundTask.end()
+    }
+  }
+
+  /// Ends the background task unless a recording is running or finishing.
+  /// Must be called on `captureSessionQueue`.
+  private func endBackgroundTaskIfIdle() {
+    if !isRecording && !isFinishingWriting {
+      backgroundTask.end()
+    }
+  }
+
+  /// Finalizes a running recording because the app is (going) in the background, where the writer
+  /// would otherwise fail. The outcome goes to a pending or the next `stopVideoRecording`.
+  /// Must be called on `captureSessionQueue`.
+  private func finalizeRecordingForBackground() {
+    guard isRecording else {
+      endBackgroundTaskIfIdle()
+      return
+    }
+    finishWriting(completion: nil)
   }
 
   @objc private func captureSessionRuntimeError(notification: NSNotification) {
@@ -605,9 +686,31 @@ final class DefaultCamera: NSObject, Camera {
       return
     }
 
+    guard !isFinishingWriting else {
+      completion(
+        .failure(
+          PigeonError(
+            code: "Error",
+            message: "The previous recording is still being finalized",
+            details: nil)))
+      return
+    }
+
+    if case .success(let path)? = backgroundFinalizedRecording {
+      // The file finalized in the background was never collected; keep it on disk.
+      NSLog("camera_avfoundation: recording finalized in background was not collected: %@", path)
+    }
+    backgroundFinalizedRecording = nil
+
     if let messenger = messenger {
       startImageStream(with: messenger) { [weak self] error in
-        self?.setUpVideoRecording(completion: completion)
+        guard let self else {
+          completion(
+            .failure(
+              PigeonError(code: "cameraNotFound", message: "Camera was closed", details: nil)))
+          return
+        }
+        self.setUpVideoRecording(completion: completion)
       }
       return
     }
@@ -787,37 +890,111 @@ final class DefaultCamera: NSObject, Camera {
   }
 
   func stopVideoRecording(completion: @escaping (Result<String, any Error>) -> Void) {
-    guard isRecording else {
-      let error = NSError(
-        domain: NSCocoaErrorDomain,
-        code: URLError.resourceUnavailable.rawValue,
-        userInfo: [NSLocalizedDescriptionKey: "Video is not recording!"]
-      )
-      completion(.failure(DefaultCamera.pigeonErrorFromNSError(error)))
+    if isRecording {
+      finishWriting(completion: completion)
+      return
+    }
+    if isFinishingWriting {
+      // A background finalization or `close` is already finishing this recording.
+      finishWritingWaiters.append(completion)
+      return
+    }
+    if let finalized = backgroundFinalizedRecording {
+      backgroundFinalizedRecording = nil
+      completion(finalized)
       return
     }
 
+    let error = NSError(
+      domain: NSCocoaErrorDomain,
+      code: URLError.resourceUnavailable.rawValue,
+      userInfo: [NSLocalizedDescriptionKey: "Video is not recording!"]
+    )
+    completion(.failure(DefaultCamera.pigeonErrorFromNSError(error)))
+  }
+
+  /// Finishes the running writer exactly once.
+  ///
+  /// `completion` and every stop request that arrives while the writer finishes receive the
+  /// outcome. Without any receiver (a background finalization) the outcome is kept for the next
+  /// `stopVideoRecording`. A writer that cannot produce a playable file is cancelled and its
+  /// temporary file removed, since Dart never learns its path. Must be called on
+  /// `captureSessionQueue` while `isRecording` is true.
+  private func finishWriting(completion: ((Result<String, any Error>) -> Void)?) {
     isRecording = false
+    isFinishingWriting = true
+    if let completion {
+      finishWritingWaiters.append(completion)
+    }
 
-    // When `isRecording` is true `startWriting` was already called so `videoWriter.status`
-    // is always either `.writing` or `.failed` and `finishWriting` does not throw exceptions so
-    // there is no need to check `videoWriter.status`
-    videoWriter?.finishWriting { [weak self] in
-      guard let strongSelf = self else { return }
+    guard let writer = videoWriter, let path = videoRecordingPath else {
+      didFinishWriting(
+        .failure(
+          PigeonError(
+            code: "IOError", message: "No video writer is recording", details: nil)))
+      return
+    }
 
-      if strongSelf.videoWriter?.status == .completed {
-        strongSelf.updateOrientation()
-        completion(.success(strongSelf.videoRecordingPath!))
-        strongSelf.videoRecordingPath = nil
+    // `startWriting` succeeded before `isRecording` was set, so the status is `.writing` unless
+    // the writer failed meanwhile (for example after the app was suspended). Without a started
+    // session (no frame arrived yet) there is nothing to finalize either.
+    guard writer.status == .writing, !isFirstVideoSample else {
+      let error = writer.error
+      writer.cancelWriting()
+      DefaultCamera.removeFile(atPath: path)
+      didFinishWriting(
+        .failure(DefaultCamera.finishWritingError(writerError: error, noFrames: isFirstVideoSample)))
+      return
+    }
+
+    // The camera is retained strongly until the writer finished: the waiters must always be
+    // completed, even when the camera is closed meanwhile. The completion hops back to
+    // `captureSessionQueue`, which owns all recording state.
+    let camera = UncheckedSendableBox(self)
+    writer.finishWriting {
+      let result: Result<String, any Error>
+      if writer.status == .completed {
+        result = .success(path)
       } else {
-        completion(
-          .failure(
-            PigeonError(
-              code: "IOError",
-              message: "AVAssetWriter could not finish writing!",
-              details: nil)))
+        DefaultCamera.removeFile(atPath: path)
+        result = .failure(DefaultCamera.finishWritingError(writerError: writer.error, noFrames: false))
+      }
+      camera.value.captureSessionQueue.async {
+        camera.value.didFinishWriting(result)
       }
     }
+  }
+
+  /// Delivers the outcome of `finishWriting`. Must be called on `captureSessionQueue`.
+  private func didFinishWriting(_ result: Result<String, any Error>) {
+    isFinishingWriting = false
+    updateOrientation()
+    let waiters = finishWritingWaiters
+    finishWritingWaiters = []
+    if waiters.isEmpty {
+      backgroundFinalizedRecording = result
+    } else {
+      waiters.forEach { $0(result) }
+    }
+    endBackgroundTaskIfIdle()
+  }
+
+  private static func finishWritingError(writerError: Error?, noFrames: Bool) -> PigeonError {
+    var message = "AVAssetWriter could not finish writing!"
+    if noFrames {
+      message += " No video frame was recorded."
+    }
+    if let writerError {
+      message += " \(writerError.localizedDescription)"
+    }
+    return PigeonError(
+      code: "IOError",
+      message: message,
+      details: (writerError as NSError?).map { "\($0.domain) \($0.code): \($0.localizedDescription)" })
+  }
+
+  private static func removeFile(atPath path: String) {
+    try? FileManager.default.removeItem(atPath: path)
   }
 
   func captureToFile(completion: @escaping (Result<String, any Error>) -> Void) {
@@ -1732,7 +1909,7 @@ final class DefaultCamera: NSObject, Camera {
     }
   }
 
-  func close() {
+  func close(completion: @escaping () -> Void) {
     stop()
     for input in videoCaptureSession.inputs {
       videoCaptureSession.removeInput(input)
@@ -1745,6 +1922,37 @@ final class DefaultCamera: NSObject, Camera {
     }
     for output in audioCaptureSession.outputs {
       audioCaptureSession.removeOutput(output)
+    }
+
+    // Closing while recording finalizes the file rather than dropping it (matching the shared
+    // release/dispose contract). Dart gets no path from `dispose`, so the file is kept on disk and
+    // its path logged; a writer that cannot be finalized is cancelled and its file removed.
+    let logOutcome: (Result<String, any Error>) -> Void = { result in
+      switch result {
+      case .success(let path):
+        NSLog("camera_avfoundation: recording finalized on close: %@", path)
+      case .failure(let error):
+        NSLog("camera_avfoundation: recording could not be finalized on close: %@", "\(error)")
+      }
+    }
+    if case .success(let path)? = backgroundFinalizedRecording {
+      NSLog("camera_avfoundation: recording finalized in background was not collected: %@", path)
+    }
+    backgroundFinalizedRecording = nil
+
+    if isRecording {
+      finishWriting { result in
+        logOutcome(result)
+        completion()
+      }
+    } else if isFinishingWriting {
+      finishWritingWaiters.append { result in
+        logOutcome(result)
+        completion()
+      }
+    } else {
+      backgroundTask.end()
+      completion()
     }
   }
 
@@ -1775,5 +1983,6 @@ final class DefaultCamera: NSObject, Camera {
 
   deinit {
     motionManager.stopAccelerometerUpdates()
+    backgroundTask.end()
   }
 }

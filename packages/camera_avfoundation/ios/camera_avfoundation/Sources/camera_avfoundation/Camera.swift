@@ -152,5 +152,14 @@ protocol Camera: FlutterTexture, AVCaptureVideoDataOutputSampleBufferDelegate,
     from connection: AVCaptureConnection
   )
 
-  func close()
+  /// Stops the capture sessions. A running recording is finalized (or cancelled and removed when
+  /// it cannot be finalized) before `completion` is called.
+  func close(completion: @escaping () -> Void)
+}
+
+extension Camera {
+  /// Closes the camera without waiting for a running recording to be finalized.
+  func close() {
+    close {}
+  }
 }
